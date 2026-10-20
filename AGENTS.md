@@ -57,7 +57,7 @@ web/                       프론트엔드 (프론트 세션 소유)
 ## 문서
 
 - 개선 결과·지표·트레이드오프: `doc/IMPROVEMENTS.md`
-- 설계 결정: `doc/adr/` (0001~0010)
+- 설계 결정: `doc/adr/` (0001~0011)
 - API 계약: `doc/API_CONTRACT.md`
 
 ## 명령

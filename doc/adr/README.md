@@ -16,3 +16,4 @@
 | [0008](0008-no-token-streaming.md) | 토큰 비스트리밍, 검증 후 1회 전송 | Accepted |
 | [0009](0009-frozen-baseline-evaluation.md) | 베이스라인 동결 + 재채점 | Accepted |
 | [0010](0010-local-llm-memory.md) | 로컬 qwen3:8b, num_ctx 8192 | Accepted |
+| [0011](0011-latency-memory-optimizations.md) | KURE fp16, 상품명 매칭 시 검색 생략, 후보 ≤ k면 리랭킹 생략 | Accepted |

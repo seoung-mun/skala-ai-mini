@@ -63,6 +63,19 @@ def test_reranker_reorders_only_the_top_pool():
     assert r.search("월급 들어오면 우대", k=1)[0][0] == "b" and PreferB.calls == [2]
 
 
+def test_reranker_skipped_when_candidates_fit_in_k():
+    class Count:
+        calls = 0
+
+        def scores(self, q, texts):
+            Count.calls += 1
+            return [0.0] * len(texts)
+    r = HybridRetriever(KeywordIndex(make().index.docs), FakeEmbedder(), reranker=Count())
+    assert {i for i, _ in r.search("적금 우대", k=3, allowed={"a", "b"})} == {"a", "b"} and Count.calls == 0
+    r.search("적금 우대", k=1, allowed={"a", "b"})
+    assert Count.calls == 1
+
+
 def test_embedding_cache_reused(tmp_path):
     make(tmp_path)
     files = list(tmp_path.glob("emb_*.npy"))

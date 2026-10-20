@@ -60,6 +60,8 @@ async def s_check(st: TaskState, deps) -> dict:
 @traceable(name="rag.search")
 async def r_search(st: TaskState, deps) -> dict:
     t0, s = time.perf_counter(), Slots(**st["s"])
+    if s.product_ids:  # 허용 집합이 곧 product_ids라 검색 결과는 그 부분집합 -> r_select 결과가 같으니 모델 호출을 생략
+        return {"work": {"t0": t0, "hits": []}}
     hits = await asyncio.to_thread(deps.retriever.search, st["q"], 3, allowed_ids(deps.catalog, s))
     return {"work": {"t0": t0, "hits": [i for i, _ in hits]}}
 

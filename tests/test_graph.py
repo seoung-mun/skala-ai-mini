@@ -46,9 +46,10 @@ class FakeMCP:
 
 class FakeRetriever:
     def __init__(self, ids):
-        self.ids = ids
+        self.ids, self.calls = ids, []
 
     def search(self, q, k, allowed=None):
+        self.calls.append(allowed)
         return [(i, 1.0) for i in self.ids if allowed is None or i in allowed][:k]
 
 
@@ -179,6 +180,18 @@ def test_follow_up_inherits_previous_product():
     prev = {"kinds": ["saving"], "product_ids": [A], "banks": [], "group": None}
     final, st = run("그거 우대조건은?", FakeLLM(ans("연 0.5%p예요")), prev=prev)
     assert final["route"] == "easy" and st["slots"]["product_ids"] == [A]
+
+
+def test_named_product_skips_retrieval_but_unnamed_question_searches():
+    def run_with(q):
+        r = FakeRetriever([A, B])
+        deps = Deps(llm=FakeLLM(ans("연 0.5%p예요")), mcp=FakeMCP(), retriever=r, catalog=CAT, data_month="202609")
+        _, st = asyncio.run(run_v2(build_graph(deps), deps, q))
+        return r.calls, st
+    calls, st = run_with("가나적금 우대조건 뭐야?")
+    assert calls == [] and st["results"][0]["doc_ids"] == [A]  # 이름이 맞은 상품이 그대로 근거
+    calls, st = run_with("적금 급여 이체 우대 얼마야?")
+    assert calls == [{A, B}] and st["results"][0]["doc_ids"] == [A, B]
 
 
 def test_graph_drawing_shows_subgraph_internals():

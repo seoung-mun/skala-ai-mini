@@ -16,10 +16,15 @@ RRF_K = 60
 
 
 class KureEmbedder:
-    def __init__(self, model: str = "nlpai-lab/KURE-v1"):
+    """fp16 로딩: MPS 할당 3.0GB -> 1.1GB. 문서 벡터 코사인 fp32 대비 최소 0.9997, 상위 50위 동일(실측, ADR-0011).
+
+    dtype을 캐시 키(name)에 넣어 다른 정밀도로 만든 벡터를 섞지 않는다.
+    """
+
+    def __init__(self, model: str = "nlpai-lab/KURE-v1", dtype: str = "float16"):
         from sentence_transformers import SentenceTransformer  # 무거워서 실제 사용 시에만 import
-        self.name = model
-        self.model = SentenceTransformer(model)
+        self.name = f"{model}@{dtype}"
+        self.model = SentenceTransformer(model, model_kwargs={"torch_dtype": dtype})
 
     def encode(self, texts: list[str]) -> np.ndarray:
         return np.asarray(self.model.encode(texts, normalize_embeddings=True, batch_size=32), dtype="float32")
@@ -57,7 +62,7 @@ class HybridRetriever:
             for r, i in enumerate(ranks[:50]):
                 score[i] = score.get(i, 0.0) + 1 / (RRF_K + r + 1)
         fused = sorted(score.items(), key=lambda x: (-x[1], x[0]))
-        if self.reranker is None or len(fused) < 2:
+        if self.reranker is None or len(fused) <= k:  # 후보가 k개 이하면 리랭킹해도 반환 집합이 같다(순서만 다름)
             return fused[:k]
         pool = [i for i, _ in fused[:max(k, self.rerank_pool)]]
         s = self.reranker.scores(query, [self.rerank_text(i) for i in pool])
