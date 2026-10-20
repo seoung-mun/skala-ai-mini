@@ -1,0 +1,50 @@
+"""키워드 검색(BM25). 형태소 분석기 없이 한글 단어를 2글자 단위로 쪼개 조사가 붙어도 매칭되게 한다."""
+from __future__ import annotations
+
+import math
+import re
+from collections import Counter
+from pathlib import Path
+
+
+def tokenize(text: str) -> list[str]:
+    out: list[str] = []
+    for w in re.findall(r"[가-힣]+|[a-z]+|\d+(?:\.\d+)?", text.lower()):
+        if w[0] >= "가":
+            out += [w[i:i + 2] for i in range(len(w) - 1)]  # 한 글자 한글(연·월·의)은 버린다
+        else:
+            out.append(w)
+    return out
+
+
+class KeywordIndex:
+    def __init__(self, docs: dict[str, str], k1: float = 1.5, b: float = 0.75):
+        if not docs:
+            raise ValueError("색인할 문서가 없습니다")
+        self.docs = docs
+        self.k1, self.b = k1, b
+        self.tf = {i: Counter(tokenize(t)) for i, t in docs.items()}
+        self.len = {i: sum(c.values()) for i, c in self.tf.items()}
+        self.avg = sum(self.len.values()) / len(self.len)
+        df = Counter(tok for c in self.tf.values() for tok in c)
+        n = len(docs)
+        self.idf = {tok: math.log(1 + (n - d + 0.5) / (d + 0.5)) for tok, d in df.items()}
+
+    @classmethod
+    def from_dir(cls, md_dir: Path) -> "KeywordIndex":
+        docs: dict[str, str] = {}
+        for f in sorted(md_dir.rglob("*.md")):
+            if f.stem in docs:
+                raise ValueError(f"문서 id 중복: {f.stem}")
+            docs[f.stem] = f.read_text(encoding="utf-8")
+        return cls(docs)
+
+    def search(self, query: str, k: int = 5) -> list[tuple[str, float]]:
+        q = Counter(tokenize(query))
+        scores = {}
+        for i, tf in self.tf.items():
+            norm = self.k1 * (1 - self.b + self.b * self.len[i] / self.avg)
+            s = sum(self.idf.get(t, 0) * tf[t] * (self.k1 + 1) / (tf[t] + norm) for t in q if t in tf)
+            if s > 0:
+                scores[i] = s
+        return sorted(scores.items(), key=lambda x: (-x[1], x[0]))[:k]

@@ -1,0 +1,10 @@
+data: {"type": "RouteDecided", "route": "easy", "reason": "단일 상품 사실 조회"}
+
+data: {"type": "TaskCompleted", "id": "t1", "agent": "rag", "ok": true, "retries": 0, "elapsed_ms": 41}
+
+data: {"type": "Validation", "attempt": 1, "verdict": "pass", "reason": null}
+
+data: {"type": "FinalAnswer", "reply": "우리SUPER주거래적금 12개월 최고금리는 연 3.85%입니다(기본 2.45% + 우대조건 충족 시).", "route": "easy", "products": [{"id": "saving_202609_0010001_WR0001F", "kind": "saving", "kind_ko": "적금", "group": "bank", "bank": "우리은행", "product": "우리SUPER주거래적금", "sale": "판매중", "highlight": {"label": "12개월 최고금리", "value": 3.85, "unit": "%"}, "data_flags": []}], "citations": [{"product_id": "saving_202609_0010001_WR0001F", "section": "우대조건", "quote": "가.급여/연금 이체:연 0.7%p"}], "calculations": [], "warnings": ["2026년 9월 공시 기준이며 실제 적용 금리는 개인 조건에 따라 다릅니다. 가입·대출 권유가 아닙니다."], "metadata": {"version": "v2", "latency_ms": 6120, "llm_calls": 1, "retries": 0, "validation_attempts": 1, "cost_usd": 0.0161, "data_month": "202609", "thread_id": "t-1"}}
+
+data: [DONE]
+

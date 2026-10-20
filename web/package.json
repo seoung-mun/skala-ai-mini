@@ -1,0 +1,12 @@
+{
+  "name": "finagent-web",
+  "version": "0.1.0",
+  "description": "FinAgent - Financial Product Grounding Agent Web Interface",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node server.js"
+  },
+  "keywords": ["finagent", "sse", "financial-grounding"],
+  "license": "ISC"
+}

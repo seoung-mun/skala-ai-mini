@@ -1,0 +1,4 @@
+data: {"type": "FinalAnswer", "reply": "우리은행 우리SUPER주거래적금 12개월 최고우대금리는 3.85%입니다.", "route": "baseline", "products": [], "citations": [], "calculations": [], "warnings": ["2026년 9월 공시 기준이며 실제 적용 금리는 개인 조건에 따라 다릅니다. 가입·대출 권유가 아닙니다."], "metadata": {"version": "v1", "latency_ms": 9800, "llm_calls": 1, "retries": 0, "validation_attempts": 0, "cost_usd": 0.0162, "data_month": "202609", "thread_id": "t-1"}}
+
+data: [DONE]
+

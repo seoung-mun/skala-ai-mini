@@ -1,0 +1,20 @@
+{"id": "R01", "route": "chat", "query": "안녕하세요"}
+{"id": "R02", "route": "chat", "query": "고마워 덕분에 잘 알았어"}
+{"id": "R03", "route": "chat", "query": "너 이름이 뭐야?"}
+{"id": "R04", "route": "out_of_scope", "query": "비트코인 지금 사도 될까?"}
+{"id": "R05", "route": "out_of_scope", "query": "자동차보험 제일 싼 데 알려줘"}
+{"id": "R06", "route": "out_of_scope", "query": "내일 서울 날씨 어때?"}
+{"id": "R07", "route": "out_of_scope", "query": "테슬라 주식 전망 어때"}
+{"id": "R08", "route": "easy", "query": "하나은행 내맘적금 우대조건 뭐야?"}
+{"id": "R09", "route": "easy", "query": "케이뱅크 코드K 정기예금 가입 방법 알려줘"}
+{"id": "R10", "route": "easy", "query": "NH올원e예금 12개월 금리 얼마야"}
+{"id": "R11", "route": "easy", "query": "카카오뱅크 한달적금은 언제 우대금리 줘?"}
+{"id": "R12", "route": "easy", "query": "SC제일은행 주택담보대출 연체이자율 알려줘"}
+{"id": "R13", "route": "easy", "query": "토스뱅크 아이 적금 누가 가입할 수 있어?"}
+{"id": "R14", "route": "easy", "query": "IBK D-day적금 목표달성하면 얼마 더 줘?"}
+{"id": "R15", "route": "hard", "query": "전세대출 은행 중에 최저금리 낮은 순서로 3개 보여줘"}
+{"id": "R16", "route": "hard", "query": "월 30만원씩 2년 적금 넣으면 이자 얼마나 돼? 연 3.5% 단리로"}
+{"id": "R17", "route": "hard", "query": "국민은행이랑 신한은행 신용대출 금리 비교해줘"}
+{"id": "R18", "route": "hard", "query": "6개월 정기예금 금리 제일 높은 저축은행 어디야?"}
+{"id": "R19", "route": "hard", "query": "2억 빌려서 20년 동안 갚으면 한 달에 얼마씩 내? 4%로"}
+{"id": "R20", "route": "hard", "query": "부산은행 펫 적금하고 경남은행 행복 DREAM 적금 중 뭐가 나아?"}

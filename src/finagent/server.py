@@ -1,0 +1,163 @@
+"""FastAPI 백엔드 (doc/API_CONTRACT.md v0.1.0). SUPERVISOR_VERSION=v1(베이스라인)|v2(기본).
+
+실행: uv run python -m finagent.server  (127.0.0.1:8100, 로컬 Ollama 필요)
+"""
+from __future__ import annotations
+
+import asyncio
+import json
+import os
+import time
+from contextlib import asynccontextmanager
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
+
+import httpx
+from fastapi import FastAPI
+from fastapi.responses import JSONResponse, StreamingResponse
+from pydantic import BaseModel, Field
+
+from .baseline import run_baseline
+from .graph.build import build_graph, initial_state, with_metadata
+from .graph.nodes import WARNING
+from .mcp_client import ToolFailed
+
+ROOT = Path(__file__).resolve().parents[2]
+MAX_MESSAGE = 500
+
+
+@dataclass
+class Runtime:
+    version: str
+    deps: Any                 # v2 Deps
+    index: Any                # v1 키워드 색인
+    sessions: Any
+    llm_name: str
+    graph: Any = None
+    close: Any = None         # 종료 시 호출할 async 함수
+
+
+async def default_runtime() -> Runtime:
+    from .catalog import Catalog
+    from .deps import Deps
+    from .llm import OllamaLLM
+    from .mcp_client import MCPClient
+    from .parser import parse_all
+    from .retrieval import HybridRetriever, KureEmbedder
+    from .search import KeywordIndex
+    from .session_store import SqliteSessionStore
+
+    catalog = Catalog(parse_all(ROOT / "data/raw"))
+    index = KeywordIndex.from_dir(ROOT / "data/md")
+    llm = OllamaLLM(os.environ.get("OLLAMA_MODEL", "qwen3:8b"), usd_per_1k_tokens=0.005)
+    mcp = MCPClient()
+    await mcp.start()
+    retriever = HybridRetriever(index, KureEmbedder(), ROOT / "data/emb_cache")
+    month = max(p.base["dcls_month"] for p in catalog.products)
+    deps = Deps(llm=llm, mcp=mcp, retriever=retriever, catalog=catalog, data_month=month)
+    return Runtime(os.environ.get("SUPERVISOR_VERSION", "v2"), deps, index,
+                   SqliteSessionStore(ROOT / "session.db"), llm.name, close=mcp.stop)
+
+
+class ChatRequest(BaseModel):
+    message: str = Field(min_length=1, max_length=MAX_MESSAGE)
+    thread_id: str = Field(default="default", max_length=100)
+
+
+def error_code(e: BaseException) -> str:
+    if isinstance(e, httpx.HTTPError):
+        return "LLM_UNAVAILABLE"
+    if isinstance(e, ToolFailed):
+        return "TOOL_FAILED"
+    if isinstance(e, asyncio.TimeoutError):
+        return "TIMEOUT"
+    return "INTERNAL"
+
+
+def create_app(make_runtime=default_runtime) -> FastAPI:
+    @asynccontextmanager
+    async def lifespan(app: FastAPI):
+        rt = await make_runtime()  # 무거운 자원(MCP subprocess·임베딩 모델·그래프)은 프로세스당 1회
+        rt.graph = build_graph(rt.deps)
+        app.state.rt = rt
+        yield
+        if rt.close:
+            await rt.close()
+        rt.sessions.close()
+
+    app = FastAPI(lifespan=lifespan)
+
+    @app.get("/health")
+    async def health():
+        rt = app.state.rt
+        return {"status": "ok", "version": rt.version, "llm": rt.llm_name, "data_month": rt.deps.data_month}
+
+    async def run_v1(rt: Runtime, message: str, thread_id: str) -> dict:
+        t0 = time.perf_counter()
+        r = await asyncio.to_thread(run_baseline, message, rt.index, rt.deps.llm)
+        m = rt.deps.data_month
+        return {"reply": r["answer"], "route": "baseline", "products": [], "citations": [], "calculations": [],
+                "warnings": [WARNING.format(y=m[:4], m=int(m[4:]))],
+                "metadata": {"version": "v1", "latency_ms": int((time.perf_counter() - t0) * 1000),
+                             "llm_calls": 1, "retries": 0, "validation_attempts": 0, "cost_usd": r["usage"]["usd"],
+                             "data_month": m, "thread_id": thread_id,
+                             "prompt_tokens": r["usage"]["prompt_tokens"],
+                             "completion_tokens": r["usage"]["completion_tokens"]}}
+
+    async def events(message: str, thread_id: str):
+        """진행 이벤트(dict)들을 내보내고 마지막에 FinalAnswer를 내보낸다. 실패하면 Error."""
+        rt = app.state.rt
+        try:
+            if rt.version == "v1":
+                final, slots = await run_v1(rt, message, thread_id), None
+            else:
+                history, prev = rt.sessions.load(thread_id)
+                t0, state = time.perf_counter(), {}
+                async for mode, payload in rt.graph.astream(initial_state(message, thread_id, history, prev),
+                                                           stream_mode=["updates", "values"]):
+                    if mode == "values":
+                        state = payload
+                        continue
+                    for delta in payload.values():
+                        for ev in (delta or {}).get("events", []):
+                            yield ev
+                final = with_metadata(state["final"], state, version="v2", thread_id=thread_id,
+                                      latency_ms=int((time.perf_counter() - t0) * 1000),
+                                      data_month=rt.deps.data_month)
+                slots = state.get("slots")
+            rt.sessions.append(thread_id, message, final["reply"], slots)
+            yield {"type": "FinalAnswer", **final}
+        except Exception as e:  # 계약상 스트림은 Error 이벤트로 끝나야 한다 — 원인은 메시지에 남긴다
+            yield {"type": "Error", "code": error_code(e), "message": f"{type(e).__name__}: {e}"[:300]}
+
+    @app.post("/chat")
+    async def chat(req: ChatRequest):
+        last = None
+        async for ev in events(req.message, req.thread_id):
+            last = ev
+        body = {k: v for k, v in last.items() if k != "type"}
+        return JSONResponse(body, status_code=200 if last["type"] == "FinalAnswer" else
+                            (503 if last["code"] == "LLM_UNAVAILABLE" else 500))
+
+    @app.get("/chat/stream")
+    async def chat_stream(message: str, thread_id: str = "default"):
+        async def gen():
+            if not message.strip() or len(message) > MAX_MESSAGE:
+                yield _sse({"type": "Error", "code": "BAD_REQUEST", "message": f"message는 1~{MAX_MESSAGE}자여야 합니다"})
+            else:
+                async for ev in events(message, thread_id):
+                    yield _sse(ev)
+            yield "data: [DONE]\n\n"
+        return StreamingResponse(gen(), media_type="text/event-stream")
+
+    return app
+
+
+def _sse(ev: dict) -> str:
+    return f"data: {json.dumps(ev, ensure_ascii=False)}\n\n"
+
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(create_app(), host="127.0.0.1", port=8100, log_level="warning")

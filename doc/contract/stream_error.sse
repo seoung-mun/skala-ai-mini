@@ -1,0 +1,6 @@
+data: {"type": "RouteDecided", "route": "hard", "reason": "비교 질문"}
+
+data: {"type": "Error", "code": "LLM_UNAVAILABLE", "message": "로컬 LLM에 연결하지 못했습니다."}
+
+data: [DONE]
+
