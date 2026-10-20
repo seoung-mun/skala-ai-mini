@@ -11,11 +11,8 @@ GROUPS = {"020000": "bank", "030300": "savingsbank"}
 
 
 def load_key() -> str:
-    for line in (ROOT / ".env").read_text().splitlines():
-        k, _, v = line.partition("=")
-        if k.strip() == "FINLIFE_API_KEY" and v.strip():
-            return v.strip().strip('"').strip("'")
-    raise SystemExit("FINLIFE_API_KEY가 .env에 없거나 비어 있습니다")
+    from finagent.config import load_config
+    return load_config().require("finlife_api_key", "금감원 상품 수집")
 
 
 def fetch_page(client: httpx.Client, key: str, endpoint: str, grp: str, page: int) -> dict:

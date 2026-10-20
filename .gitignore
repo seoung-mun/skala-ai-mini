@@ -3,7 +3,6 @@
 __pycache__/
 .pytest_cache/
 data/raw/
-eval/results/*.jsonl
 data/emb_cache/
 session.db
 eval/results/*_pilot*

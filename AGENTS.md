@@ -30,18 +30,35 @@
 ```
 scripts/fetch_finlife.py   금감원 API 5종 × (은행, 저축은행) 수집 -> data/raw/*.json
 scripts/build_data.py      data/raw -> data/md/{kind}/{group}/{id}.md (실행마다 재생성)
+src/finagent/config.py     .env를 한 번 읽어 고정 (CONFIG, 자리표시 값은 키 없음 처리)
+src/finagent/schemas.py    LLM 입출력·도구 결과 pydantic 모델 (모든 출력에 ok 키)
 src/finagent/parser.py     정규화·이상치 플래그·마크다운·섹션 분리
+src/finagent/catalog.py    구조화 조회·계산 (순수 함수)
+src/finagent/slots.py      슬롯 추출·규칙 라우팅
 src/finagent/search.py     키워드 검색(BM25, 한글 2-gram)
-src/finagent/llm.py        Ollama 어댑터 (chat(system, user) 인터페이스, 테스트에서는 가짜 주입)
-src/finagent/baseline.py   v1: 키워드 top-5 -> LLM 1회
+src/finagent/retrieval.py  하이브리드 검색(BM25 + KURE, RRF)
+src/finagent/llm.py        Ollama·OpenAI 어댑터 (structured(system, 입력모델, 출력모델))
+src/finagent/mcp_server.py MCP: query_products, calculate, product://{id}, compare_procedure
+src/finagent/mcp_client.py stdio 클라이언트 (ToolResult 반환, 타임아웃만 재시도)
+src/finagent/graph/        v2 감독 그래프(nodes) + 서브에이전트 3종(agents: structured·rag·calc, Send 병렬)
+src/finagent/validate.py   숫자·인용·1위 검증 (순수 함수)
+src/finagent/server.py     FastAPI /chat, /chat/stream (계약 문서 기준)
+src/finagent/baseline.py   v1: 키워드 top-5 -> LLM 1회 (비교용으로 비구조화 그대로 유지)
 src/finagent/scoring.py    골든셋 코드 채점
-eval/build_golden.py       골든셋 20문항 (정답은 실데이터에서 코드로 계산)
-eval/run_eval.py           측정 -> eval/results/{system}.jsonl, {system}_summary.md
+eval/build_golden.py       골든셋 40문항 (정답은 실데이터에서 코드로 계산)
+eval/routing_set.jsonl     라우팅 평가 세트 20문항
+eval/run_eval.py           v1·v2 반복 측정 -> eval/results/, compare.md
 web/                       프론트엔드 (프론트 세션 소유)
 ```
 
 마크다운 섹션 마커: `<!-- retrieval: keyword -->`는 키워드·구조화 조회 대상,
 `<!-- retrieval: embedding -->`은 임베딩 대상이다. v1은 마커와 무관하게 전부 키워드로 검색한다.
+
+## 문서
+
+- 개선 결과·지표·트레이드오프: `doc/IMPROVEMENTS.md`
+- 설계 결정: `doc/adr/` (0001~0010)
+- API 계약: `doc/API_CONTRACT.md`
 
 ## 명령
 
@@ -49,7 +66,10 @@ web/                       프론트엔드 (프론트 세션 소유)
 uv run pytest -q                       # 단위 테스트
 uv run python scripts/build_data.py    # 마크다운 재생성
 uv run python eval/build_golden.py     # 골든셋 재생성
-uv run python eval/run_eval.py baseline --model qwen3:8b   # 측정(로컬 Ollama 필요)
+uv run python eval/run_eval.py baseline --repeat 3   # v1 측정(로컬 Ollama 필요)
+uv run python eval/run_eval.py v2 --repeat 3
+uv run python eval/run_eval.py compare               # eval/results/compare.md
+uv run python -m finagent.server                     # API 서버 (.env.example 참고)
 ```
 
 ## 포트

@@ -1,6 +1,6 @@
 # API 계약 (백엔드 ↔ 프론트)
 
-- 버전: **0.1.0** (2026-10-20, 초안)
+- 버전: **0.2.0** (2026-10-20)
 - 백엔드 `127.0.0.1:8100`, 프론트는 8600에서 같은 경로로 프록시한다.
 - 예시 스트림: `doc/contract/stream_easy.sse`, `stream_hard.sse`, `stream_error.sse`, `stream_v1.sse`
 
@@ -9,6 +9,7 @@
 | 버전 | 날짜 | 변경 |
 |---|---|---|
 | 0.1.0 | 2026-10-20 | 최초 작성 |
+| 0.2.0 | 2026-10-20 | Calculation에 `after_tax`(세후 이자, 선택) 추가, `inputs` 키를 calculate 도구 기준으로 변경, metadata에 토큰 수 추가 (하위 호환) |
 
 ## 1. 엔드포인트
 
@@ -80,9 +81,12 @@
 
 **Calculation** — 계산 도구 결과 (hard에서만)
 ```json
-{"name": "적금 단리 세전이자", "inputs": {"monthly_won": 500000, "term_months": 12, "rate_pct": 2.45},
- "formula": "월납입 × T(T+1)/2 × 연이율 / 1200 (원 미만 절사)", "result": 79625, "unit": "원"}
+{"name": "적금 이자", "inputs": {"product_type": "saving", "amount_won": 500000, "term_months": 12,
+ "rate_pct": 2.45, "interest_type": "simple", "repayment": "equal_payment"},
+ "formula": "월납입 × T(T+1)/2 × 연이율 / 1200, 원 미만 절사, 세후 = 세전 × (1 - 0.154)",
+ "result": 79625, "after_tax": 67362, "unit": "원"}
 ```
+- `result`는 세전(대출은 월 상환액), `after_tax`는 세후 이자(대출이면 없음).
 
 **warnings** — 항상 1개 이상. 기본 문구:
 `"2026년 9월 공시 기준이며 실제 적용 금리는 개인 조건에 따라 다릅니다. 가입·대출 권유가 아닙니다."`
@@ -90,7 +94,7 @@
 **Metadata**
 ```json
 {"version": "v2", "latency_ms": 8423, "llm_calls": 2, "retries": 0, "validation_attempts": 1,
- "cost_usd": 0.0172, "data_month": "202609", "thread_id": "t-1"}
+ "cost_usd": 0.0172, "data_month": "202609", "thread_id": "t-1", "prompt_tokens": 1247, "completion_tokens": 140}
 ```
 - `cost_usd`는 로컬 추론 기준 가상 단가로 계산한 값이다(실과금 아님).
 

@@ -6,7 +6,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import os
 import time
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
@@ -16,12 +15,13 @@ from typing import Any
 import httpx
 from fastapi import FastAPI
 from fastapi.responses import JSONResponse, StreamingResponse
-from pydantic import BaseModel, Field
+from fastapi.exceptions import RequestValidationError
+from pydantic import BaseModel
 
 from .baseline import run_baseline
 from .graph.build import build_graph, initial_state, with_metadata
 from .graph.nodes import WARNING
-from .mcp_client import ToolFailed
+from .schemas import LLMOutputError
 
 ROOT = Path(__file__).resolve().parents[2]
 MAX_MESSAGE = 500
@@ -40,36 +40,53 @@ class Runtime:
 
 async def default_runtime() -> Runtime:
     from .catalog import Catalog
+    from .config import load_config
     from .deps import Deps
-    from .llm import OllamaLLM
+    from .llm import build_llm
     from .mcp_client import MCPClient
     from .parser import parse_all
-    from .retrieval import HybridRetriever, KureEmbedder
+    from .retrieval import CrossEncoderReranker, HybridRetriever, KureEmbedder
     from .search import KeywordIndex
     from .session_store import SqliteSessionStore
 
     catalog = Catalog(parse_all(ROOT / "data/raw"))
     index = KeywordIndex.from_dir(ROOT / "data/md")
-    llm = OllamaLLM(os.environ.get("OLLAMA_MODEL", "qwen3:8b"), usd_per_1k_tokens=0.005)
+    cfg = load_config()
+    llm = build_llm(cfg)
     mcp = MCPClient()
     await mcp.start()
-    retriever = HybridRetriever(index, KureEmbedder(), ROOT / "data/emb_cache")
+    retriever = HybridRetriever(index, KureEmbedder(), ROOT / "data/emb_cache",
+                                reranker=CrossEncoderReranker() if cfg.rerank else None)
     month = max(p.base["dcls_month"] for p in catalog.products)
     deps = Deps(llm=llm, mcp=mcp, retriever=retriever, catalog=catalog, data_month=month)
-    return Runtime(os.environ.get("SUPERVISOR_VERSION", "v2"), deps, index,
+    return Runtime(cfg.supervisor_version, deps, index,
                    SqliteSessionStore(ROOT / "session.db"), llm.name, close=mcp.stop)
 
 
+MAX_THREAD_ID = 100
+
+
 class ChatRequest(BaseModel):
-    message: str = Field(min_length=1, max_length=MAX_MESSAGE)
-    thread_id: str = Field(default="default", max_length=100)
+    message: str
+    thread_id: str = "default"
+
+
+def request_error(message: str, thread_id: str) -> str | None:
+    """POST·스트림이 함께 쓰는 입력 검증. 문제가 있으면 사용자에게 보여줄 이유를 돌려준다."""
+    if not message.strip():
+        return "message가 비어 있습니다"
+    if len(message) > MAX_MESSAGE:
+        return f"message는 {MAX_MESSAGE}자 이하여야 합니다"
+    if not thread_id.strip() or len(thread_id) > MAX_THREAD_ID:
+        return f"thread_id는 1~{MAX_THREAD_ID}자여야 합니다"
+    return None
 
 
 def error_code(e: BaseException) -> str:
     if isinstance(e, httpx.HTTPError):
         return "LLM_UNAVAILABLE"
-    if isinstance(e, ToolFailed):
-        return "TOOL_FAILED"
+    if isinstance(e, LLMOutputError):
+        return "INTERNAL"
     if isinstance(e, asyncio.TimeoutError):
         return "TIMEOUT"
     return "INTERNAL"
@@ -87,6 +104,10 @@ def create_app(make_runtime=default_runtime) -> FastAPI:
         rt.sessions.close()
 
     app = FastAPI(lifespan=lifespan)
+
+    @app.exception_handler(RequestValidationError)
+    async def bad_body(request, exc):  # 본문 형식 오류도 계약의 오류 형식으로 돌려준다
+        return JSONResponse({"code": "BAD_REQUEST", "message": f"요청 형식 오류: {exc.errors()[0]['msg']}"}, 400)
 
     @app.get("/health")
     async def health():
@@ -133,6 +154,8 @@ def create_app(make_runtime=default_runtime) -> FastAPI:
 
     @app.post("/chat")
     async def chat(req: ChatRequest):
+        if err := request_error(req.message, req.thread_id):
+            return JSONResponse({"code": "BAD_REQUEST", "message": err}, 400)
         last = None
         async for ev in events(req.message, req.thread_id):
             last = ev
@@ -143,8 +166,8 @@ def create_app(make_runtime=default_runtime) -> FastAPI:
     @app.get("/chat/stream")
     async def chat_stream(message: str, thread_id: str = "default"):
         async def gen():
-            if not message.strip() or len(message) > MAX_MESSAGE:
-                yield _sse({"type": "Error", "code": "BAD_REQUEST", "message": f"message는 1~{MAX_MESSAGE}자여야 합니다"})
+            if err := request_error(message, thread_id):
+                yield _sse({"type": "Error", "code": "BAD_REQUEST", "message": err})
             else:
                 async for ev in events(message, thread_id):
                     yield _sse(ev)

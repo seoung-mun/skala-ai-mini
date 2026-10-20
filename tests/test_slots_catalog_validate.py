@@ -82,7 +82,7 @@ def test_category_only_name_needs_bank_name():
 
 
 def test_citation_product_id_brackets_are_normalized():
-    assert check_answer("0.5%p", "0.5", [{"product_id": "[p1]", "quote": "급여 0.5%p"}], {"p1": "급여 0.5%p"})[0]
+    assert check_answer("0.5%p", allowed([0.5]), [{"product_id": "[p1]", "quote": "급여 0.5%p"}], {"p1": "급여 0.5%p"})[0]
 
 
 def test_credit_query_requires_score():
@@ -95,15 +95,56 @@ def test_financial_values_units():
     assert financial_values("79,625원, 연 2.45%, 우대 0.7%p, 50만원, 1억") == {79625.0, 2.45, 0.7, 500000.0, 1e8}
 
 
+def allowed(pct=(), won=()):
+    return {"pct": set(pct), "won": set(won)}
+
+
 def test_check_answer_rejects_unsupported_number_and_fake_quote():
-    ev = "기본금리 2.45 최고 3.85 계산 79625"
+    al = allowed(pct=[2.45, 3.85], won=[79625])
     sec = {"p1": "가.급여/연금 이체:연 0.7%p"}
-    assert check_answer("이자는 79,625원, 금리 2.45%예요 1) 2)", ev, [], sec) == (True, None)
-    ok, why = check_answer("이자는 147,000원이에요", ev, [], sec)
-    assert not ok and "147000" in why
-    assert not check_answer("0.7%p 더 줘요", ev + " 0.7", [{"product_id": "p1", "quote": "급여이체 시 1%p"}], sec)[0]
-    assert check_answer("0.7%p 더 줘요", ev + " 0.7", [{"product_id": "p1", "quote": "급여/연금 이체:연 0.7%p"}], sec)[0]
-    assert not check_answer("금리는 2.45%예요", ev, [], sec, required=[79625])[0]
+    assert check_answer("이자는 79,625원, 금리 2.45%예요 1) 2)", al, [], sec) == (True, None)
+    ok, why = check_answer("이자는 147,000원이에요", al, [], sec)
+    assert not ok and "147000원" in why
+    assert not check_answer("0.7%p 더 줘요", allowed([0.7]), [{"product_id": "p1", "quote": "급여이체 시 1%p"}], sec)[0]
+    assert check_answer("0.7%p 더 줘요", allowed([0.7]), [{"product_id": "p1", "quote": "급여/연금 이체:연 0.7%p"}], sec)[0]
+    assert not check_answer("금리는 2.45%예요", al, [], sec, required=[(79625, 67363)])[0]
+    assert check_answer("세후 67,363원이에요", allowed(won=[67363]), [], sec, required=[(79625, 67363)])[0]
+
+
+def test_term_number_does_not_validate_a_rate():
+    """기간 12(개월)가 근거에 있어도 금리 12%는 통과하면 안 된다(리뷰 재현 케이스)."""
+    from finagent.schemas import AnswerInput, ProductDoc, RateRow
+    from finagent.validate import allowed_values
+    inp = AnswerInput(question="가나적금 12개월 기본금리 얼마야?",
+                      rows=[RateRow(product_id="p", bank="가", product="가나", option="12개월", metric="기본금리", value=2.45)],
+                      documents=[ProductDoc(product_id="p", title="t", info={}, rate_table="| 12 | 정액 | 2.45 | 3.85 |")])
+    al = allowed_values(inp, inp.question)
+    assert al["pct"] == {2.45, 3.85} and 12.0 not in al["pct"]
+    assert not check_answer("12개월 상품의 기본금리는 12%예요", al, [], {})[0]
+    assert check_answer("12개월 기본금리는 2.45%, 우대 포함 3.85%예요", al, [], {})[0]
+
+
+def test_table_quote_rejected_with_actionable_reason():
+    ok, why = check_answer("5.00%예요", allowed([5.0]), [{"product_id": "p", "quote": "최고금리 | 5.00"}], {"p": "최고금리 | 5.00"})
+    assert not ok and "상품 설명" in why
+
+
+def test_winner_must_be_first_mentioned():
+    w = (["국민은행", "일반신용대출"], ["국민은행", "일반신용대출", "케이뱅크", "신용대출"])
+    al = allowed([6.19, 7.12])
+    assert not check_answer("케이뱅크가 7.12%로 가장 낮아요 (국민은행 6.19%)", al, [], {}, winner=w)[0]
+    assert check_answer("국민은행 일반신용대출이 6.19%로 가장 낮아요", al, [], {}, winner=w)[0]
+
+
+def test_metric_whitelist_blocks_average_rate_ranking():
+    cat = Catalog([_saving("A", "1", "가은행", "가나적금", 3.0)])
+    with pytest.raises(ValueError, match="평균금리"):
+        cat.query("saving", metric="avg")
+    with pytest.raises(ValueError, match="평균금리"):
+        cat.query("mortgage", metric="avg")
+    with pytest.raises(ValueError, match="신용점수 구간"):
+        cat.query("credit", metric="min", credit_score=700)
+    assert cat.query("saving", metric="rate_max")[0]["value"] == 4.0
 
 
 # ---------- 실데이터 회귀 ----------
@@ -131,13 +172,10 @@ def test_catalog_reproduces_golden_compare_answers():
         assert set(golden[gid]["check"]["values"]) & ({r["product"] for r in rows} | {r["bank"] for r in rows}), gid
 
 
-def test_table_quote_rejected_with_actionable_reason():
-    ok, why = check_answer("5.00%예요", "5.00", [{"product_id": "p", "quote": "최고금리 | 5.00"}], {"p": "최고금리 | 5.00"})
-    assert not ok and "상품 설명" in why
+def test_split_citations_keeps_only_verbatim_quotes():
+    from finagent.validate import split_citations
+    kept, dropped = split_citations([{"product_id": "[p]", "quote": "급여 0.5%p"}, {"product_id": "p", "quote": "해당없음"},
+                                     {"product_id": "x", "quote": "급여 0.5%p"}], {"p": "급여 0.5%p 제공"})
+    assert kept == [{"product_id": "p", "quote": "급여 0.5%p"}] and len(dropped) == 2
 
 
-def test_winner_must_be_first_mentioned():
-    w = (["국민은행", "일반신용대출"], ["국민은행", "일반신용대출", "케이뱅크", "신용대출"])
-    ev = "6.19 7.12"
-    assert not check_answer("케이뱅크가 7.12%로 가장 낮아요 (국민은행 6.19%)", ev, [], {}, winner=w)[0]
-    assert check_answer("국민은행 일반신용대출이 6.19%로 가장 낮아요", ev, [], {}, winner=w)[0]

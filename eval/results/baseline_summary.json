@@ -1,0 +1,27 @@
+{
+  "n_items": 40,
+  "repeats": 1,
+  "accuracy_per_run": [
+    0.6
+  ],
+  "accuracy": 0.6,
+  "accuracy_by": {
+    "calc": 0.167,
+    "chat": 1.0,
+    "compare": 0.5,
+    "easy": 0.75,
+    "fact": 0.917,
+    "follow_up": 0.5,
+    "hard": 0.375,
+    "out_of_scope": 1.0,
+    "semantic": 0.5
+  },
+  "hit_at_k": 0.771,
+  "latency_median_s": 11.3,
+  "latency_p90_s": 17.1,
+  "prompt_tokens_per_q": 3188,
+  "completion_tokens_per_q": 75,
+  "usd_per_q": 0.01631,
+  "llm_calls_per_q": 1.0,
+  "retries_total": 0
+}

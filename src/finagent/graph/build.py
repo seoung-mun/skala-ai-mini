@@ -8,25 +8,27 @@ from pathlib import Path
 from langgraph.graph import END, START, StateGraph
 
 from . import nodes as N
+from .agents import build_agents
 from .state import AgentState
 
 
 def build_graph(deps):
     g = StateGraph(AgentState)
     for name, fn in (("route", N.route_node), ("chat_answer", N.chat_answer_node), ("refuse", N.refuse_node),
-                     ("retrieve", N.retrieve_node), ("plan", N.plan_node), ("gate", N.gate_node),
-                     ("research", N.research_node), ("replan_check", N.replan_check_node),
+                     ("plan", N.plan_node), ("gate", N.gate_node), ("replan_check", N.replan_check_node),
                      ("write", N.write_node), ("validate", N.validate_node), ("finalize", N.finalize_node)):
         g.add_node(name, partial(fn, deps=deps))
+    agents = build_agents(deps)
+    for name, sub in agents.items():  # 컴파일된 서브그래프를 노드로 붙인다(Send로 병렬 호출)
+        g.add_node(name, sub)
+        g.add_edge(name, "replan_check")  # fan-in: 같은 단계의 서브에이전트가 모두 끝난 뒤 1회 실행
     g.add_edge(START, "route")
-    g.add_conditional_edges("route", N.after_route, ["chat_answer", "refuse", "retrieve", "plan"])
+    g.add_conditional_edges("route", N.after_route, ["chat_answer", "refuse", "plan", "rag_agent"])
     g.add_edge("chat_answer", END)
     g.add_edge("refuse", END)
-    g.add_edge("retrieve", "write")
     g.add_edge("plan", "gate")
-    g.add_conditional_edges("gate", N.after_gate, ["research", "finalize"])
-    g.add_edge("research", "replan_check")
-    g.add_conditional_edges("replan_check", N.after_replan, ["research", "write"])
+    g.add_conditional_edges("gate", N.after_gate, [*agents, "finalize"])
+    g.add_conditional_edges("replan_check", N.after_replan, [*agents, "write"])
     g.add_edge("write", "validate")
     g.add_conditional_edges("validate", N.after_validate, ["write", "finalize"])
     g.add_edge("finalize", END)
@@ -34,12 +36,12 @@ def build_graph(deps):
 
 
 def export_mermaid(app, path: Path) -> None:
-    path.write_text(app.get_graph().draw_mermaid(), encoding="utf-8")
+    path.write_text(app.get_graph(xray=True).draw_mermaid(), encoding="utf-8")  # xray: 서브그래프 내부까지
 
 
 def initial_state(query: str, thread_id: str, history: list[dict], prev_slots: dict | None) -> dict:
     return {"query": query, "thread_id": thread_id, "history": history, "prev_slots": prev_slots,
-            "events": [], "llm_calls": 0, "retries": 0, "prompt_tokens": 0, "completion_tokens": 0, "cost_usd": 0.0}
+            "events": [], "results": [], "llm_calls": 0, "retries": 0, "prompt_tokens": 0, "completion_tokens": 0, "cost_usd": 0.0}
 
 
 def with_metadata(final: dict, state: dict, *, version: str, latency_ms: int, thread_id: str, data_month: str) -> dict:

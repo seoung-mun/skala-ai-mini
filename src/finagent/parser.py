@@ -194,6 +194,15 @@ def _rate_table(p: Product) -> str:
     return _table(["신용점수 구간"] + [c["type_nm"] + "(%)" for c in cols], rows)
 
 
+def rate_table(p: Product) -> str:
+    return _rate_table(p) if p.options else "금리 옵션이 공시되지 않았습니다."
+
+
+def descriptions(p: Product) -> list[tuple[str, str]]:
+    """임베딩·인용 대상 자유 텍스트 [(섹션명, 원문)]."""
+    return [(lab, p.base[f]) for f, lab in EMBED_FIELDS[p.kind] if p.base.get(f)]
+
+
 def to_markdown(p: Product) -> str:
     b = p.base
     # 오늘 날짜로 판매종료를 판정하지 않는다(시계 의존). 공시 종료일만 사실대로 적는다.
@@ -215,7 +224,7 @@ def to_markdown(p: Product) -> str:
     out += [_rate_table(p) if p.options else "금리 옵션이 공시되지 않았습니다.", ""]
     if p.flags:
         out += ["<!-- retrieval: keyword -->", "## 데이터 주의", ""] + [f"- {f}" for f in p.flags] + [""]
-    texts = [(lab, b[f]) for f, lab in EMBED_FIELDS[p.kind] if b.get(f)]
+    texts = descriptions(p)
     if texts:
         out += ["<!-- retrieval: embedding -->", "## 상품 설명", ""]
         for lab, t in texts:

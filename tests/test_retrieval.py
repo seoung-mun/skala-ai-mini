@@ -51,6 +51,18 @@ def test_allowed_filter_restricts_results():
     assert [i for i, _ in r.search("적금 우대", k=3, allowed={"b"})] == ["b"]
 
 
+def test_reranker_reorders_only_the_top_pool():
+    class PreferB:
+        calls = []
+
+        def scores(self, q, texts):
+            PreferB.calls.append(len(texts))
+            return [1.0 if "자동이체" in t else 0.0 for t in texts]
+    docs = make().index.docs
+    r = HybridRetriever(KeywordIndex(docs), FakeEmbedder(), reranker=PreferB(), rerank_pool=2)
+    assert r.search("월급 들어오면 우대", k=1)[0][0] == "b" and PreferB.calls == [2]
+
+
 def test_embedding_cache_reused(tmp_path):
     make(tmp_path)
     files = list(tmp_path.glob("emb_*.npy"))

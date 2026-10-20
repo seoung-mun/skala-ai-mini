@@ -4,6 +4,9 @@
   python eval/run_eval.py baseline --repeat 3
   python eval/run_eval.py v2 --repeat 3
   python eval/run_eval.py compare          # eval/results/compare.md 생성
+  python eval/run_eval.py rescore          # 저장된 답변을 현재 채점기로 다시 채점(LLM 호출 없음)
+
+베이스라인은 조건(골든셋·데이터·모델)을 고정한 뒤 한 번만 측정한다. 채점 규칙이 바뀌면 rescore만 한다.
 """
 import argparse
 import asyncio
@@ -14,8 +17,12 @@ from collections import defaultdict
 from pathlib import Path
 
 from finagent.baseline import run_baseline
+from finagent.config import load_config
 from finagent.graph.build import build_graph, run_v2
+from finagent.graph.nodes import collected
+from finagent.llm import build_llm
 from finagent.scoring import score
+from finagent.search import KeywordIndex
 from finagent.server import default_runtime
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -27,40 +34,56 @@ def expected_route(it: dict) -> str:
     return EXPECTED_ROUTE.get(it["category"], it["difficulty"])
 
 
+async def run_baseline_only(golden: list[dict], repeat: int) -> list[dict]:
+    """v1은 키워드 색인과 LLM만 쓴다 — 임베딩 모델·MCP 서버를 띄우지 않아 메모리를 아낀다."""
+    llm, index = build_llm(load_config()), KeywordIndex.from_dir(ROOT / "data/md")
+    await asyncio.to_thread(llm.chat, "warmup", "안녕")  # 모델 로딩을 측정에서 제외
+    rows = []
+    for rep in range(repeat):
+        for it in golden:
+            r = await asyncio.to_thread(run_baseline, it["query"], index, llm)
+            res = {"answer": r["answer"], "retrieved": r["retrieved"], "route": "baseline",
+                   "latency_s": r["latency_s"], "llm_calls": 1, "retries": 0,
+                   "prompt_tokens": r["usage"]["prompt_tokens"],
+                   "completion_tokens": r["usage"]["completion_tokens"], "usd": r["usage"]["usd"]}
+            rows.append(_record(it, res, rep))
+    return rows
+
+
+def _record(it: dict, res: dict, rep: int) -> dict:
+    row = {**it, **res, **score(it, res), "repeat": rep}
+    print(f"[{rep}] {it['id']:4} {'O' if row['correct'] else 'X'} route={res['route']:12} "
+          f"{res['latency_s']:6.1f}s llm={res['llm_calls']} | {res['answer'][:60]!r}", flush=True)
+    return row
+
+
 async def run_system(system: str, golden: list[dict], repeat: int) -> list[dict]:
-    rt = await default_runtime()  # v1·v2가 같은 데이터·같은 LLM을 쓴다
+    if system == "baseline":
+        return await run_baseline_only(golden, repeat)
+    rt = await default_runtime()
     app = build_graph(rt.deps)
     rows = []
     try:
         await asyncio.to_thread(rt.deps.llm.chat, "warmup", "안녕")  # 모델 로딩을 측정에서 제외
         for rep in range(repeat):
             for it in golden:
-                if system == "baseline":  # v1은 대화 메모리가 없어 setup 질문을 쓰지 않는다
-                    r = await asyncio.to_thread(run_baseline, it["query"], rt.index, rt.deps.llm)
-                    res = {"answer": r["answer"], "retrieved": r["retrieved"], "route": "baseline",
-                           "latency_s": r["latency_s"], "llm_calls": 1, "retries": 0,
-                           "prompt_tokens": r["usage"]["prompt_tokens"],
-                           "completion_tokens": r["usage"]["completion_tokens"], "usd": r["usage"]["usd"]}
-                else:
-                    prev = None
-                    if it.get("setup"):
-                        _, s0 = await run_v2(app, rt.deps, it["setup"], thread_id=f"{it['id']}-{rep}")
-                        prev = s0.get("slots")
-                    t0 = time.perf_counter()
-                    final, s = await run_v2(app, rt.deps, it["query"], thread_id=f"{it['id']}-{rep}", prev_slots=prev)
-                    m = final["metadata"]
-                    res = {"answer": final["reply"], "route": final["route"],
-                           "retrieved": list(dict.fromkeys(list(s.get("docs", {})) +
-                                                           [x["product_id"] for x in s.get("structured", [])])),
-                           "latency_s": round(time.perf_counter() - t0, 2), "llm_calls": m["llm_calls"],
-                           "retries": m["retries"], "validation_attempts": m["validation_attempts"],
-                           "prompt_tokens": m["prompt_tokens"], "completion_tokens": m["completion_tokens"],
-                           "usd": m["cost_usd"], "events": [e["type"] for e in s["events"]],
-                           "verified": s.get("verified")}
-                row = {**it, **res, **score(it, res), "repeat": rep}
-                rows.append(row)
-                print(f"[{rep}] {it['id']:4} {'O' if row['correct'] else 'X'} route={res['route']:12} "
-                      f"{res['latency_s']:6.1f}s llm={res['llm_calls']} | {res['answer'][:60]!r}", flush=True)
+                # v2 (v1은 run_baseline_only — 대화 메모리가 없어 setup 질문을 쓰지 않는다)
+                prev = None
+                if it.get("setup"):
+                    _, s0 = await run_v2(app, rt.deps, it["setup"], thread_id=f"{it['id']}-{rep}")
+                    prev = s0.get("slots")
+                t0 = time.perf_counter()
+                final, s = await run_v2(app, rt.deps, it["query"], thread_id=f"{it['id']}-{rep}", prev_slots=prev)
+                m = final["metadata"]
+                rows_, _, doc_ids, _ = collected(s)  # 서브에이전트 결과에서 근거로 쓴 상품
+                res = {"answer": final["reply"], "route": final["route"],
+                       "retrieved": list(dict.fromkeys(doc_ids + [x["product_id"] for x in rows_])),
+                       "latency_s": round(time.perf_counter() - t0, 2), "llm_calls": m["llm_calls"],
+                       "retries": m["retries"], "validation_attempts": m["validation_attempts"],
+                       "prompt_tokens": m["prompt_tokens"], "completion_tokens": m["completion_tokens"],
+                       "usd": m["cost_usd"], "events": [e["type"] for e in s["events"]],
+                       "verified": s.get("verified")}
+                rows.append(_record(it, res, rep))
     finally:
         if rt.close:
             await rt.close()
@@ -126,14 +149,40 @@ def compare() -> str:
     return md
 
 
+def rescore() -> None:
+    """저장된 답변을 현재 골든셋·채점기로 다시 채점한다. 질문이 바뀐 문항이 있으면 재측정이 필요하므로 중단한다."""
+    golden = {g["id"]: g for g in (json.loads(l) for l in (ROOT / "eval/golden.jsonl").read_text().splitlines())}
+    for system in ("baseline", "v2"):
+        path = RES / f"{system}.jsonl"
+        if not path.exists():
+            continue
+        rows = [json.loads(l) for l in path.read_text().splitlines()]
+        changed = sorted({r["id"] for r in rows if r["id"] not in golden or golden[r["id"]]["query"] != r["query"]})
+        if changed:
+            raise SystemExit(f"{system}: 골든셋 질문이 바뀐 문항 {changed} — rescore가 아니라 재측정이 필요합니다")
+        flips = 0
+        for r in rows:
+            g = golden[r["id"]]
+            new = score(g, r)
+            flips += new["correct"] != r["correct"]
+            r.update(check=g["check"], gold_ids=g["gold_ids"], retrieval=g["retrieval"], **new)
+        path.write_text("".join(json.dumps(r, ensure_ascii=False) + "\n" for r in rows), encoding="utf-8")
+        s = summarize(rows)
+        (RES / f"{system}_summary.json").write_text(json.dumps(s, ensure_ascii=False, indent=2), encoding="utf-8")
+        print(f"{system}: {len(rows)}행 재채점, 판정 변경 {flips}건, 정답률 {s['accuracy']}")
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("system", choices=["baseline", "v2", "compare"])
+    ap.add_argument("system", choices=["baseline", "v2", "compare", "rescore"])
     ap.add_argument("--repeat", type=int, default=3)
     ap.add_argument("--ids", help="쉼표로 구분한 문항 id만 실행(점검용, 결과 파일은 *_pilot로 저장)")
     a = ap.parse_args()
     if a.system == "compare":
         print(compare())
+        return
+    if a.system == "rescore":
+        rescore()
         return
     golden = [json.loads(l) for l in (ROOT / "eval/golden.jsonl").read_text().splitlines()]
     name = a.system

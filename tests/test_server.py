@@ -47,7 +47,7 @@ def make_app(llm, version="v2", tmp=":memory:"):
 
 
 def test_stream_v2_easy_follows_contract_and_remembers_thread(tmp_path):
-    ok = {"reply": "연 0.5%p예요", "citations": []}
+    ok = {"ok": True, "reply": "연 0.5%p예요", "citations": [], "missing": ""}
     with TestClient(make_app(FakeLLM(ok, ok), tmp=tmp_path / "s.db")) as c:
         evs = parse_sse(c.get("/chat/stream", params={"message": "가나적금 우대조건 뭐야?", "thread_id": "t"}).text)
         check_contract(evs)
@@ -65,7 +65,7 @@ def test_post_chat_returns_final_body_and_v1_toggle():
 
 def test_errors_are_contract_errors():
     class Down:
-        def chat(self, *a, **k):
+        def structured(self, *a, **k):
             import httpx
             raise httpx.ConnectError("refused")
     with TestClient(make_app(Down())) as c:
@@ -75,4 +75,17 @@ def test_errors_are_contract_errors():
         bad = parse_sse(c.get("/chat/stream", params={"message": " "}).text)
         assert bad[-1]["code"] == "BAD_REQUEST"
         assert c.post("/chat", json={"message": "안녕"}).status_code == 503
-        assert c.post("/chat", json={"message": ""}).status_code == 422
+
+
+def test_input_validation_is_the_same_for_post_and_stream():
+    class NeverCalled:
+        def structured(self, *a, **k):
+            raise AssertionError("잘못된 입력이 LLM까지 갔다")
+    with TestClient(make_app(NeverCalled())) as c:
+        for body in ({"message": ""}, {"message": "   "}, {"message": "x" * 501},
+                     {"message": "안녕", "thread_id": "x" * 101}, {"message": 3}, {}):
+            r = c.post("/chat", json=body)
+            assert r.status_code == 400 and r.json()["code"] == "BAD_REQUEST", body
+        for params in ({"message": "   "}, {"message": "안녕", "thread_id": "x" * 101}):
+            evs = parse_sse(c.get("/chat/stream", params=params).text)
+            assert evs == [{"type": "Error", "code": "BAD_REQUEST", "message": evs[0]["message"]}], params

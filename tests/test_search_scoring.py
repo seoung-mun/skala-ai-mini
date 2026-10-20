@@ -37,6 +37,21 @@ def test_score_numeric_and_retrieval():
         {"correct": False, "retrieval_hit": False}
 
 
+def test_score_first_asserted_value_must_be_gold_and_not_negated():
+    q = {"check": {"type": "nums_any", "values": [2.45]}, "gold_ids": [], "retrieval": None, "query": "12개월 기본금리?"}
+    a = lambda s: score(q, {"answer": s, "retrieved": []})["correct"]
+    assert a("기본금리는 2.45%이고 우대 포함 3.85%예요")
+    assert not a("2.45%가 아니라 99.9%입니다")          # 리뷰 재현: 부정 후 다른 값
+    assert not a("99.9%입니다. 참고로 작년엔 2.45%")      # 처음 주장한 값이 틀림
+    assert not a("2.45입니다")                         # 단위 없는 숫자는 주장으로 보지 않음
+
+
+def test_score_ignores_echoed_inputs_from_question():
+    q = {"check": {"type": "nums_any", "values": [79625]}, "gold_ids": [], "retrieval": None,
+         "query": "월 50만원씩 12개월 넣으면 이자 얼마야?"}
+    assert score(q, {"answer": "월 50만원씩 넣으면 세전이자는 79,625원이에요", "retrieved": []})["correct"]
+
+
 def test_score_names_ignore_spaces_and_refusal_rejects_made_up_price():
     assert score(item({"type": "names_any", "values": ["KDB 자유적금"]}), {"answer": "KDB자유적금이에요", "retrieved": []})["correct"]
     ok = {"answer": "주가 정보는 문서에 없어요", "retrieved": []}
@@ -51,6 +66,20 @@ def test_top_choice_uses_first_mentioned_candidate_not_any_mention():
     right = {"answer": "국민은행이 6.19%로 가장 낮고 신한은행은 7.36%예요", "retrieved": []}
     assert not score(item(chk, gold=()), wrong)["correct"]
     assert score(item(chk, gold=()), right)["correct"]
+
+
+def test_top_choice_named_products_in_question_still_judged_by_first_pick():
+    chk = {"type": "top_choice", "values": ["카카오뱅크 26주적금"], "candidates": ["카카오뱅크 26주적금", "토스뱅크 굴비 적금"]}
+    it = {**item(chk, gold=()), "query": "카카오뱅크 26주적금이랑 토스뱅크 굴비 적금 중에 뭐가 더 높아?"}
+    assert score(it, {"answer": "카카오뱅크 26주적금(5.0%)이 굴비 적금(4.3%)보다 높아요", "retrieved": []})["correct"]
+    assert not score(it, {"answer": "토스뱅크 굴비 적금이 카카오뱅크 26주적금보다 높아요", "retrieved": []})["correct"]
+
+
+def test_golden_candidates_exclude_generic_names():
+    import json
+    from pathlib import Path
+    g = {json.loads(l)["id"]: json.loads(l) for l in (Path(__file__).resolve().parents[1] / "eval/golden.jsonl").read_text().splitlines()}
+    assert "정기예금" not in g["H2"]["check"]["candidates"] and "The든든예금(시즌2)" in g["H2"]["check"]["candidates"]
 
 
 def test_first_mention_prefers_longer_name_at_same_position():

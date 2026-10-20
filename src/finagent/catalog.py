@@ -14,6 +14,9 @@ BANK_ALIASES = {"SC제일": "한국스탠다드차타드은행", "IBK": "중소�
                 "수협": "수협은행", "카카오": "주식회사 카카오뱅크", "케이뱅크": "주식회사 케이뱅크",
                 "토스": "토스뱅크 주식회사", "하나": "주식회사 하나은행"}
 LOAN_KINDS = ("mortgage", "rent", "credit")
+# 순위에 쓸 수 있는 금리. 공시 평균금리(avg)는 범위 밖 값이 많아 허용하지 않는다. 신용대출은 점수 구간 금리만 쓴다.
+METRICS = {"saving": ("rate", "rate_max"), "deposit": ("rate", "rate_max"), "mortgage": ("min", "max"),
+           "rent": ("min", "max"), "credit": ()}
 # 이름이 이 분류어뿐인 상품('신용대출', 'e-정기예금')은 질문 속 분류어와 구분이 안 돼 은행명 없이 매칭하지 않는다.
 CATEGORY_RE = (r"일반신용대출|마이너스한도대출|장기카드대출|신용대출|한도대출|카드론|주택담보대출|담보대출|전세자금대출|"
                r"전세대출|자금대출|대출|정기예금|정기적금|자유적금|적금|예금|통장|상품|개인|일반")
@@ -24,7 +27,7 @@ def squash(s: str) -> str:
     return re.sub(r"\s+", "", s).lower()
 
 
-def _core(name: str) -> str:
+def core_name(name: str) -> str:
     """'IBK D-day적금(자유적립식)' -> 'ibkd-day적금' (괄호 부연은 사용자가 잘 안 쓴다)."""
     return squash(re.sub(r"\([^)]*\)", "", name))
 
@@ -39,7 +42,7 @@ class Catalog:
             raise ValueError("상품 id 중복")
         banks_per_name: dict[str, set[str]] = {}
         for p in self.products:
-            banks_per_name.setdefault(_core(p.name), set()).add(p.bank)
+            banks_per_name.setdefault(core_name(p.name), set()).add(p.bank)
         # '정기예금'처럼 여러 회사가 같은 이름을 쓰면 이름만으로는 상품을 특정할 수 없다.
         self.generic = {n for n, b in banks_per_name.items()
                         if len(b) > 1 or len(re.sub(r"[^가-힣a-z0-9]", "", re.sub(CATEGORY_RE, "", n))) < 2}
@@ -54,14 +57,14 @@ class Catalog:
 
     def find_products(self, text: str) -> list[Product]:
         t, banks = squash(text), set(self.find_banks(text))
-        cand = [p for p in self.products if _core(p.name) and _core(p.name) in t]
+        cand = [p for p in self.products if core_name(p.name) and core_name(p.name) in t]
         exact = [p for p in cand if squash(p.name) in t]
         if exact:  # '신한주택대출(아파트)'처럼 전체 이름이 있으면 괄호만 다른 상품은 뺀다
             cand = exact
         if banks:
-            cand = [p for p in cand if p.bank in banks] or [p for p in cand if _core(p.name) not in self.generic]
+            cand = [p for p in cand if p.bank in banks] or [p for p in cand if core_name(p.name) not in self.generic]
         else:
-            cand = [p for p in cand if _core(p.name) not in self.generic]
+            cand = [p for p in cand if core_name(p.name) not in self.generic]
         names = {squash(p.name) for p in cand}
         # 더 긴 이름에 포함되는 짧은 이름 매칭은 버린다 ('26주적금' < '카카오뱅크26주적금')
         return [p for p in cand if not any(n != squash(p.name) and squash(p.name) in n for n in names)]
@@ -71,6 +74,11 @@ class Catalog:
               metric: str | None = None, credit_score: int | None = None, product_ids: list[str] | None = None,
               banks: list[str] | None = None, filters: dict | None = None, limit: int = 5) -> list[dict]:
         """상품별 최적 옵션 1행씩 정렬해 반환. 예·적금은 높은 금리, 대출은 낮은 금리가 앞. 동률은 모두 포함."""
+        if kind not in METRICS:
+            raise ValueError(f"알 수 없는 상품 종류: {kind}")
+        if metric is not None and metric not in METRICS[kind]:
+            raise ValueError(f"{kind}의 metric은 {list(METRICS[kind]) or '지정 불가(신용점수 구간 금리)'} 중 하나여야 합니다"
+                             f": {metric} (공시 평균금리는 순위에 쓰지 않습니다)")
         metric = metric or default_metric(kind)
         if kind == "credit" and credit_score is None:
             raise ValueError("신용대출 금리 조회에는 신용점수가 필요합니다")

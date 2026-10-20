@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from finagent.mcp_client import MCPClient, ToolFailed, with_retry
+from finagent.mcp_client import MCPClient, with_retry
 
 HAS_RAW = any((Path(__file__).resolve().parents[1] / "data/raw").glob("*.json"))
 
@@ -15,21 +15,28 @@ def test_mcp_tools_resource_prompt_end_to_end():
         c = MCPClient()
         await c.start()
         try:
-            calc, retries = await c.call_tool("calc_saving_interest",
-                                              {"monthly_won": 500000, "term_months": 12, "rate_pct": 2.45})
-            assert calc["result"] == 79625 and retries == 0
+            calc, retries = await c.call_tool("calculate", {"product_type": "saving", "amount_won": 500000,
+                                                            "term_months": 12, "rate_pct": 2.45})
+            assert calc.ok and calc.data["result"] == 79625 and calc.data["after_tax"] == 67362 and retries == 0
+            loan, _ = await c.call_tool("calculate", {"product_type": "loan", "amount_won": 100_000_000,
+                                                      "term_months": 360, "rate_pct": 4.5})
+            assert loan.data["result"] == 506685 and loan.data["after_tax"] is None
             rows, _ = await c.call_tool("query_products", {"kind": "saving", "group": "bank", "term_months": 12,
                                                            "metric": "rate", "limit": 1})
-            assert rows["rows"] and all(r["value"] == rows["rows"][0]["value"] for r in rows["rows"])
+            top = rows.data["rows"]
+            assert rows.ok and top and all(r["value"] == top[0]["value"] for r in top)
             empty, _ = await c.call_tool("query_products", {"kind": "saving", "term_months": 999})
-            assert empty == {"rows": []}
-            doc = await c.read_resource(f"product://{rows['rows'][0]['product_id']}")
+            assert empty.ok and empty.data == {"rows": []}
+            doc = await c.read_resource(f"product://{top[0]['product_id']}")
             assert doc.startswith("---") and "## 금리" in doc
-            assert "query_products" in await c.get_prompt("compare_procedure", {"question": "q"})
-            with pytest.raises(ToolFailed, match="kind"):
-                await c.call_tool("query_products", {"kind": "stock"})
-            with pytest.raises(ToolFailed, match="신용점수"):
-                await c.call_tool("query_products", {"kind": "credit"})
+            assert "rows" in await c.get_prompt("compare_procedure", {"question": "q"})
+            bad_kind, _ = await c.call_tool("query_products", {"kind": "stock"})
+            assert not bad_kind.ok and "kind" in bad_kind.error
+            no_score, _ = await c.call_tool("query_products", {"kind": "credit"})
+            assert not no_score.ok and "신용점수" in no_score.error
+            bad_type, _ = await c.call_tool("calculate", {"product_type": "stock", "amount_won": 1,
+                                                          "term_months": 1, "rate_pct": 1})
+            assert not bad_type.ok and bad_type.tool_name == "calculate"  # 스키마 위반도 ok=false로 돌아온다
         finally:
             await c.stop()
     asyncio.run(run())

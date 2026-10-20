@@ -3,6 +3,7 @@ import json
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
+from finagent.catalog import Catalog, core_name
 from finagent.parser import parse_all
 
 ALL = parse_all(ROOT / "data/raw")
@@ -14,8 +15,12 @@ def bank_ko(b: str) -> str:
 BANKS = sorted({bank_ko(p.bank) for p in ALL})
 
 
+CAT = Catalog(ALL)
+
+
 def names(kind: str) -> list[str]:
-    return sorted({p.name for p in ALL if p.kind == kind})
+    """채점 후보: 이름만으로 상품을 특정할 수 있는 이름(일반명 '정기예금' 등은 제외)."""
+    return sorted({p.name for p in ALL if p.kind == kind and core_name(p.name) not in CAT.generic})
 
 
 def one(kind: str, name: str, bank: str | None = None):
