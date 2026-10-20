@@ -75,7 +75,8 @@ class RateRow(BaseModel):
     product: str
     option: str = Field(description="기간·적립방식·상환방식 등 옵션 설명")
     metric: str = Field(description="금리 종류(기본금리·최고금리(우대 포함)·최저금리·대출금리)")
-    value: float = Field(description="금리(%)")
+    value: float = Field(description="금리(%) 또는 우대 폭(%p)")
+    unit: str = Field(default="%", description="'%' 또는 우대 폭이면 '%p'")
 
 
 class Calculation(BaseModel):
@@ -116,7 +117,7 @@ class AnswerInput(BaseModel):
         out = [f"## 질문\n{self.question}"]
         if self.rows:
             out.append("## 조회 결과 (rows, 1위부터)\n" + "\n".join(
-                f"{i}. [{r.product_id}] {r.bank} {r.product} ({r.option}) {r.metric} {r.value}%"
+                f"{i}. [{r.product_id}] {r.bank} {r.product} ({r.option}) {r.metric} {r.value}{r.unit}"
                 for i, r in enumerate(self.rows, 1)))
         if self.calculations:
             out.append("## 계산 결과 (calculations)\n" + "\n".join(

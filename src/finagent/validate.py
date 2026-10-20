@@ -72,9 +72,10 @@ def split_citations(citations: list[dict], sections: dict[str, str]) -> tuple[li
 
 
 def check_answer(reply: str, allowed: dict[str, set[float]], citations: list[dict], sections: dict[str, str],
-                 required: list[tuple[float, ...]] = (), winner: tuple[list[str], list[str]] | None = None
-                 ) -> tuple[bool, str | None]:
-    """allowed: allowed_values()의 단위별 허용 수치. sections: product_id -> 인용 가능한 원문."""
+                 required: list[tuple[float, ...]] = (), winner: tuple[list[str], list[str]] | None = None,
+                 attribute: tuple[str, set[float]] | None = None) -> tuple[bool, str | None]:
+    """allowed: allowed_values()의 단위별 허용 수치. sections: product_id -> 인용 가능한 원문.
+    attribute: (질문이 묻는 값의 이름, 허용값) — 답의 첫 금리 수치가 그 값이어야 한다."""
     bad = sorted({f"{v:g}{'%' if k == 'pct' else '원'}" for _, k, v in unit_values(reply) if v not in allowed[k]})
     if bad:
         return False, f"근거에 없는 수치 {bad}"
@@ -86,6 +87,11 @@ def check_answer(reply: str, allowed: dict[str, set[float]], citations: list[dic
             return False, "금리표는 인용하지 말고 '상품 설명' 아래 문장만 그대로 인용하세요(표의 숫자는 답에 그대로 쓰면 됩니다)"
         if squash(c.get("quote", "")) not in squash(src):
             return False, f"원문에 없는 인용: {c.get('quote', '')[:40]}"
+    if attribute:
+        name, vals = attribute
+        first = next((v for _, k, v in unit_values(reply) if k == "pct"), None)
+        if first not in vals:
+            return False, f"질문은 {name}을 묻습니다. 첫 금리 수치로 {', '.join(f'{v:g}%p' for v in sorted(vals))}를 쓰세요"
     if winner:  # 1위를 묻는 질문: 답이 처음 언급한 상품·회사가 조회 1위여야 한다
         tops, candidates = winner
         picked = first_mention(reply, candidates)

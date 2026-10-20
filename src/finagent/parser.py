@@ -85,6 +85,8 @@ def _option(kind: str, row: dict) -> dict:
     if kind in ("saving", "deposit"):
         o = {"rate_type_nm": row["intr_rate_type_nm"], "term_months": int(row["save_trm"]),
              "rate": _num(row["intr_rate"]), "rate_max": _num(row["intr_rate2"])}
+        # 우대 폭(%p) = 최고 - 기본. 실데이터 E2·S3·S4·N10에서 설명 원문의 우대 폭과 일치(ADR-0012)
+        o["spread"] = None if None in (o["rate"], o["rate_max"]) else round(o["rate_max"] - o["rate"], 2)
         if kind == "saving":
             o["rsrv_type_nm"] = row["rsrv_type_nm"]
         return o

@@ -15,7 +15,7 @@ BANK_ALIASES = {"SC제일": "한국스탠다드차타드은행", "IBK": "중소�
                 "토스": "토스뱅크 주식회사", "하나": "주식회사 하나은행"}
 LOAN_KINDS = ("mortgage", "rent", "credit")
 # 순위에 쓸 수 있는 금리. 공시 평균금리(avg)는 범위 밖 값이 많아 허용하지 않는다. 신용대출은 점수 구간 금리만 쓴다.
-METRICS = {"saving": ("rate", "rate_max"), "deposit": ("rate", "rate_max"), "mortgage": ("min", "max"),
+METRICS = {"saving": ("rate", "rate_max", "spread"), "deposit": ("rate", "rate_max", "spread"), "mortgage": ("min", "max"),
            "rent": ("min", "max"), "credit": ()}
 # 이름이 이 분류어뿐인 상품('신용대출', 'e-정기예금')은 질문 속 분류어와 구분이 안 돼 은행명 없이 매칭하지 않는다.
 CATEGORY_RE = (r"일반신용대출|마이너스한도대출|장기카드대출|신용대출|한도대출|카드론|주택담보대출|담보대출|전세자금대출|"
@@ -174,3 +174,46 @@ def loan_payment(principal_won: int, term_months: int, rate_pct: float, method: 
     if method != "equal_payment":
         raise ValueError(f"지원하지 않는 상환방식: {method}")
     return round(principal_won * r / (1 - (1 + r) ** -term_months))
+
+
+# ---------- 역산(목표 → 필요 금액) ----------
+INTEREST_TAX = 0.154  # 일반과세 이자소득세 15.4%(소득세 14% + 지방소득세 1.4%)
+
+
+def after_tax(interest: int) -> int:
+    return int(interest * (1 - INTEREST_TAX))
+
+
+def _least(ok, hi: int) -> int:
+    """ok(x)가 참인 최소 정수 x (1 <= x <= hi, ok는 단조). 원 단위 절사가 있어 식을 뒤집지 않고 정방향 함수로 찾는다."""
+    lo = 1
+    while lo < hi:
+        mid = (lo + hi) // 2
+        lo, hi = (lo, mid) if ok(mid) else (mid + 1, hi)
+    return lo
+
+
+def saving_goal(target_won: int, term_months: int, rate_pct: float, compound: bool = False) -> int:
+    """세후 만기 수령액(월납입 × T + 세후이자)이 목표 이상이 되는 최소 월 납입액(원)."""
+    _check(target_won=target_won, term_months=term_months, rate_pct=rate_pct)
+    return _least(lambda m: m * term_months + after_tax(saving_interest(m, term_months, rate_pct, compound))
+                  >= target_won, target_won)
+
+
+def deposit_goal(target_won: int, term_months: int, rate_pct: float, compound: bool = False) -> int:
+    """세후 만기 수령액(원금 + 세후이자)이 목표 이상이 되는 최소 원금(원)."""
+    _check(target_won=target_won, term_months=term_months, rate_pct=rate_pct)
+    return _least(lambda p: p + after_tax(deposit_interest(p, term_months, rate_pct, compound)) >= target_won,
+                  target_won)
+
+
+def loan_capacity(monthly_budget_won: int, term_months: int, rate_pct: float, method: str = "equal_payment") -> int:
+    """월 상환액이 예산 이하인 최대 대출 원금(원)."""
+    _check(monthly_budget_won=monthly_budget_won, term_months=term_months, rate_pct=rate_pct)
+    # 원금이 이 값이면 월 상환액이 반드시 예산을 넘는다(원리금균등 >= 원금/T, 만기일시 = 원금 × r)
+    hi = (monthly_budget_won + 1) * term_months if method == "equal_payment" else \
+        math.ceil((monthly_budget_won + 1) * 1200 / rate_pct)
+    p = _least(lambda x: loan_payment(x, term_months, rate_pct, method) > monthly_budget_won, hi) - 1
+    if p <= 0:
+        raise ValueError(f"월 상환 가능액 {monthly_budget_won}원으로는 대출 원금을 만들 수 없습니다")
+    return p

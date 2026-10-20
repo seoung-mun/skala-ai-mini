@@ -1,6 +1,6 @@
 # API 계약 (백엔드 ↔ 프론트)
 
-- 버전: **0.2.0** (2026-10-20)
+- 버전: **0.3.0** (2026-10-20)
 - 백엔드 `127.0.0.1:8100`, 프론트는 8600에서 같은 경로로 프록시한다.
 - 예시 스트림: `doc/contract/stream_easy.sse`, `stream_hard.sse`, `stream_error.sse`, `stream_v1.sse`
 
@@ -10,6 +10,7 @@
 |---|---|---|
 | 0.1.0 | 2026-10-20 | 최초 작성 |
 | 0.2.0 | 2026-10-20 | Calculation에 `after_tax`(세후 이자, 선택) 추가, `inputs` 키를 calculate 도구 기준으로 변경, metadata에 토큰 수 추가 (하위 호환) |
+| 0.3.0 | 2026-10-20 | (v3) `highlight.unit`에 `"%p"`(우대 폭) 추가, Calculation `inputs.mode`(`forward` \| `goal`) 추가 — goal이면 `result`가 필요 월 납입액·필요 원금·최대 대출 원금 (하위 호환) |
 
 ## 1. 엔드포인트
 
@@ -71,7 +72,7 @@
  "data_flags": []}
 ```
 - `kind`: `deposit` | `saving` | `mortgage` | `rent` | `credit`, `group`: `bank` | `savingsbank`
-- `highlight`는 없을 수 있다(null). `value`는 숫자, 표시 형식은 프론트가 정한다.
+- `highlight`는 없을 수 있다(null). `value`는 숫자, 표시 형식은 프론트가 정한다. `unit`은 `"%"` 또는 `"%p"`(우대 폭)이다.
 - `data_flags`: 공시 데이터 이상 경고 문자열(예: 평균금리가 범위 밖). 비어 있지 않으면 경고 아이콘으로 표시.
 
 **Citation** — 답의 근거가 된 원문
@@ -87,6 +88,7 @@
  "result": 79625, "after_tax": 67362, "unit": "원"}
 ```
 - `result`는 세전(대출은 월 상환액), `after_tax`는 세후 이자(대출이면 없음).
+- `inputs.mode`가 `"goal"`이면 역산이다. `inputs.amount_won`은 목표 세후 만기 수령액(대출은 월 상환 가능액)이고, `result`는 필요한 월 납입액·원금(대출은 최대 대출 원금), `after_tax`는 없다. `name`으로 구분해 표시하면 된다.
 
 **warnings** — 항상 1개 이상. 기본 문구:
 `"2026년 9월 공시 기준이며 실제 적용 금리는 개인 조건에 따라 다릅니다. 가입·대출 권유가 아닙니다."`

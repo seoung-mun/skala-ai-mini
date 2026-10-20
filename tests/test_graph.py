@@ -33,6 +33,12 @@ class FakeMCP:
             return ToolResult(ok=False, tool_name=name, error="boom"), 0
         if name == "query_products":
             return ToolResult(ok=True, tool_name=name, data={"rows": CAT.query(**args)}), 0
+        if args.get("mode") == "goal":
+            fn = {"saving": C.saving_goal, "deposit": C.deposit_goal}.get(args["product_type"])
+            res = fn(args["amount_won"], args["term_months"], args["rate_pct"]) if fn else \
+                C.loan_capacity(args["amount_won"], args["term_months"], args["rate_pct"], args["repayment"])
+            return ToolResult(ok=True, tool_name=name, data={"name": "역산", "result": res, "after_tax": None,
+                                                             "unit": "원", "inputs": args, "formula": "f"}), 0
         fn = {"saving": C.saving_interest, "deposit": C.deposit_interest}.get(args["product_type"])
         res = fn(args["amount_won"], args["term_months"], args["rate_pct"]) if fn else \
             C.loan_payment(args["amount_won"], args["term_months"], args["rate_pct"], args["repayment"])
@@ -199,3 +205,36 @@ def test_graph_drawing_shows_subgraph_internals():
     mermaid = build_graph(deps).get_graph(xray=True).draw_mermaid()
     for node in ("structured_agent", "rag_agent", "calc_agent", "resolve_rate", "replan_check"):
         assert node in mermaid
+
+
+def test_spread_question_gets_spread_row_and_rejects_max_rate_answer():
+    """'우대 몇 %p'에 최고금리(3.85%)로 답하면 반려, 재작성도 실패하면 우대 폭 표로 대체(v2 오답 E2·S4·N10 유형)."""
+    llm = FakeLLM(ans("가나적금 최고금리는 3.85%예요"), ans("우대 포함 3.85%예요"))
+    final, st = run("가나적금 우대금리 최고 몇 %p야?", llm)
+    assert [t["agent"] for t in st["tasks"]] == ["rag", "structured"]
+    row = llm.inputs[0].rows[0]
+    assert (row.value, row.unit) == (1.4, "%p") and "1.4%p" in llm.inputs[0].to_prompt()
+    assert [e["verdict"] for e in st["events"] if e["type"] == "Validation"] == ["fail", "fail"]
+    assert "우대 폭" in st["events"][-1]["reason"] or "우대 폭" in st["feedback"]
+    assert "1.4%p" in final["reply"] and final["products"][0]["highlight"]["unit"] == "%p"
+
+
+def test_spread_answer_passes():
+    final, st = run("가나적금 우대금리 최고 몇 %p야?", FakeLLM(ans("가나적금 우대금리는 최고 1.4%p예요 (최고금리 3.85%)")))
+    assert st["verified"] and final["reply"].startswith("가나적금 우대금리는 최고 1.4%p")
+
+
+def test_goal_question_uses_reverse_calculation():
+    need = C.saving_goal(10_000_000, 12, 3.0)
+    llm = FakeLLM(ans(f"1년에 1,000만원을 모으려면 연 3.0%로 매달 {need:,}원씩 넣으면 돼요"))
+    final, st = run("1년 동안 1000만원 모으려면 적금 연 3% 기준 매달 얼마 넣어야 해?", llm)
+    calc = next(t for t in st["tasks"] if t["agent"] == "calc")
+    assert st["route"] == "hard" and calc["args"]["mode"] == "goal" and calc["args"]["product_type"] == "saving"
+    assert st["verified"] and final["calculations"][0]["result"] == need
+
+
+def test_unnamed_spread_question_uses_top_retrieved_product():
+    llm = FakeLLM(ans("다라적금 우대 폭은 최고 0.3%p예요"))
+    final, st = run("나은행 환경 적금 우대 최대 몇 %p야?", llm, ids=(B, A))
+    spread = [t for t in st["tasks"] if t["agent"] == "structured"]
+    assert spread and spread[0]["args"]["product_ids"] == [B] and st["verified"]

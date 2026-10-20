@@ -13,6 +13,9 @@ KIND_RE = [("credit", r"신용대출|마이너스|신용점수|카드론"), ("re
 OUT_OF_SCOPE_RE = r"주식|주가|코인|비트코인|이더리움|보험|날씨|환율|펀드|로또|부동산\s*시세"
 FINANCE_RE = r"금리|이자|우대|대출|예금|적금|은행|뱅크|가입|상품|수수료|한도|상환|신용|저축|빌리|빌려|갚"
 COMPARE_RE = r"제일|가장|비교|중에|중\s|순서|순위|추천|어디|어느|뭐가\s*나아|더\s*높|더\s*낮|\d+\s*개\s*(보여|알려)"
+# 최대 우대 폭(%p)을 묻는 질문 — 최고금리(%)와 구분. "자동이체하면 몇 %p?"처럼 조건 하나를 묻는 질문은 제외
+SPREAD_RE = r"우대\s*(금리\s*)?폭|(최고|최대).*(%\s*p|퍼센트\s*포인트)"
+GOAL_RE = r"모으려면|모으고\s*싶|모을\s*수|만들려면|목표|얼마까지\s*빌|최대\s*얼마.*빌|갚을\s*수\s*있"  # 역산 계산
 CALC_RE = r"이자\s*(얼마|는)|얼마나\s*(돼|받|붙)|상환액|한\s*달에\s*얼마|월\s*얼마|갚으면|빌리면|빌려서|넣으면|세전이자|만기에\s*얼마"
 
 
@@ -47,6 +50,7 @@ class Slots:
     filters: dict = field(default_factory=dict)
     compare: bool = False
     calc: bool = False
+    goal: bool = False
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -64,7 +68,8 @@ def extract(q: str, catalog: Catalog) -> Slots:
     group = "savingsbank" if "저축은행" in q else ("bank" if re.search(r"(^|\s)은행", q) else None)
     metric = None
     if any(k in ("saving", "deposit") for k in kinds):
-        metric = "rate" if "기본" in q else ("rate_max" if re.search(r"최고|우대", q) else None)
+        metric = "spread" if re.search(SPREAD_RE, q) else (
+            "rate" if "기본" in q else ("rate_max" if re.search(r"최고|우대", q) else None))
     elif re.search(r"최고\s*금리|최대\s*금리", q):
         metric = "max"
     f = {}
@@ -89,7 +94,8 @@ def extract(q: str, catalog: Catalog) -> Slots:
                  rate_pct=float(rate.group(1)) if rate else None, banks=catalog.find_banks(q),
                  product_ids=[p.id for p in prods], metric=metric, filters=f,
                  compare=bool(re.search(COMPARE_RE, cue)) or len(distinct) >= 2,
-                 calc=bool(re.search(CALC_RE, cue)) and bool(amounts))
+                 calc=bool(re.search(CALC_RE, cue)) and bool(amounts),
+                 goal=bool(re.search(GOAL_RE, cue)) and bool(amounts))
 
 
 def route_rules(q: str, s: Slots) -> tuple[str | None, str]:
@@ -100,7 +106,7 @@ def route_rules(q: str, s: Slots) -> tuple[str | None, str]:
         return "chat", "금융상품 관련 표현 없음"
     if s.compare:
         return "hard", "비교·집계 질문"
-    if s.calc or (s.amount_won and s.term_months):
+    if s.calc or s.goal or (s.amount_won and s.term_months):
         return "hard", "금액·기간이 있는 계산 질문"
     if s.product_ids or s.kinds:
         return "easy", "단일 상품·사실 조회"

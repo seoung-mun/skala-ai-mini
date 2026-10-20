@@ -200,6 +200,38 @@ items.append({"id": "N20", "difficulty": "easy", "category": "follow_up", "setup
               "query": "그거 24개월은?", "gold_ids": [woori.id], "retrieval": "any",
               "check": {"type": "nums_any", "values": sorted(r24)}})
 
+# ---- v3 역산(목표 -> 필요 금액). 정답은 catalog 함수와 별개로 정방향 식을 직접 탐색해 구한다 ----
+def least(total, target: int, guess: float) -> int:
+    x = max(1, int(guess) - 50)
+    while total(x) >= target:  # 추정이 커도 아래에서부터 다시 올라간다
+        x = max(1, x - 1000)
+        if x == 1:
+            break
+    while total(x) < target:
+        x += 1
+    return x
+
+
+TAX = 1 - 0.154
+T, R, TARGET = 12, 3.0, 10_000_000
+s_total = lambda m: m * T + int(int(m * T * (T + 1) / 2 * R / 1200) * TAX)
+need = least(s_total, TARGET, TARGET / (T + T * (T + 1) / 2 * R / 1200 * TAX))
+add("G1", "hard", "goal", "1년 동안 적금으로 1000만원 모으려면 연 3% 단리 기준 매달 얼마 넣어야 해?", [],
+    {"type": "nums_any", "values": [need]})
+T, R, TARGET = 24, 3.5, 50_000_000
+d_total = lambda p: p + int(int(p * R * T / 1200) * TAX)
+need = least(d_total, TARGET, TARGET / (1 + R * T / 1200 * TAX))
+add("G2", "hard", "goal", "2년 뒤에 예금으로 5000만원 만들려면 연 3.5%로 지금 얼마 넣어야 해?", [],
+    {"type": "nums_any", "values": [need]})
+r, T, BUDGET = 4.5 / 1200, 360, 1_000_000
+pay = lambda p: round(p * r / (1 - (1 + r) ** -T))
+cap = int(BUDGET * (1 - (1 + r) ** -T) / r) + 1000  # 반올림 때문에 넉넉히 위에서 내려온다
+while pay(cap) > BUDGET:
+    cap -= 1
+assert pay(cap + 1) > BUDGET
+add("G3", "hard", "goal", "월 100만원씩 갚을 수 있으면 연 4.5%로 30년 원리금균등이면 최대 얼마까지 빌릴 수 있어?", [],
+    {"type": "nums_any", "values": [cap]})
+
 # ---- 잡담·범위 밖 ----
 add("C1", "easy", "chat", "안녕! 너는 뭘 도와줄 수 있어?", [], {"type": "nonempty"})
 add("C2", "easy", "out_of_scope", "오늘 삼성전자 주가 얼마야?", [], {"type": "refusal"})

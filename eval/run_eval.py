@@ -3,6 +3,8 @@
 사용:
   python eval/run_eval.py baseline --repeat 3
   python eval/run_eval.py v2 --repeat 3
+  python eval/run_eval.py v3 --repeat 1    # 현재 그래프 코드를 v3 결과로 저장(v2 결과는 보존)
+  python eval/run_eval.py baseline --missing   # 골든셋에 새로 추가된 문항만 측정해 기존 결과에 덧붙임
   python eval/run_eval.py compare          # eval/results/compare.md 생성
   python eval/run_eval.py rescore          # 저장된 답변을 현재 채점기로 다시 채점(LLM 호출 없음)
 
@@ -125,26 +127,29 @@ def summarize(rows: list[dict]) -> dict:
 
 
 def compare() -> str:
-    a = json.loads((RES / "baseline_summary.json").read_text())
-    b = json.loads((RES / "v2_summary.json").read_text())
+    names = [(n, label) for n, label in (("baseline", "v1 베이스라인"), ("v2", "v2"), ("v3", "v3"))
+             if (RES / f"{n}_summary.json").exists()]
+    cols = [json.loads((RES / f"{n}_summary.json").read_text()) for n, _ in names]
     pct = lambda x: f"{x * 100:.1f}%" if x is not None else "-"
-    rows = [("정답률 (전체)", pct(a["accuracy"]), pct(b["accuracy"])),
-            ("정답률 run별", ", ".join(map(pct, a["accuracy_per_run"])), ", ".join(map(pct, b["accuracy_per_run"])))]
-    for k in sorted(set(a["accuracy_by"]) | set(b["accuracy_by"])):
-        rows.append((f"정답률 ({k})", pct(a["accuracy_by"].get(k)), pct(b["accuracy_by"].get(k))))
-    rows += [("검색 적중 (정답 상품이 근거에 포함)", pct(a["hit_at_k"]), pct(b["hit_at_k"])),
-             ("지연 중앙값 / p90 (초)", f"{a['latency_median_s']} / {a['latency_p90_s']}",
-              f"{b['latency_median_s']} / {b['latency_p90_s']}"),
-             ("프롬프트 토큰 / 문항", a["prompt_tokens_per_q"], b["prompt_tokens_per_q"]),
-             ("생성 토큰 / 문항", a["completion_tokens_per_q"], b["completion_tokens_per_q"]),
-             ("가상 비용 USD / 문항", a["usd_per_q"], b["usd_per_q"]),
-             ("LLM 호출 / 문항", a["llm_calls_per_q"], b["llm_calls_per_q"]),
-             ("도구 retry (run당)", a["retries_total"], b["retries_total"]),
-             ("라우팅 정확도", "-", pct(b.get("route_accuracy"))),
-             ("검증 시도 / 문항", "-", b.get("validation_attempts_per_q")),
-             ("검증 실패 → 도구 결과 대체 (run당)", "-", b.get("unverified_fallback"))]
-    md = (f"# Before / After (골든셋 {a['n_items']}문항 × {a['repeats']}회, 같은 데이터·같은 모델)\n\n"
-          "| 지표 | v1 베이스라인 | v2 |\n|---|---|---|\n" + "\n".join(f"| {k} | {x} | {y} |" for k, x, y in rows) + "\n")
+    rows = [("문항 수", *(c["n_items"] for c in cols)),
+            ("정답률 (전체)", *(pct(c["accuracy"]) for c in cols)),
+            ("정답률 run별", *(", ".join(map(pct, c["accuracy_per_run"])) for c in cols))]
+    for k in sorted(set().union(*(c["accuracy_by"] for c in cols))):
+        rows.append((f"정답률 ({k})", *(pct(c["accuracy_by"].get(k)) for c in cols)))
+    rows += [("검색 적중 (정답 상품이 근거에 포함)", *(pct(c["hit_at_k"]) for c in cols)),
+             ("지연 중앙값 / p90 (초)", *(f"{c['latency_median_s']} / {c['latency_p90_s']}" for c in cols)),
+             ("프롬프트 토큰 / 문항", *(c["prompt_tokens_per_q"] for c in cols)),
+             ("생성 토큰 / 문항", *(c["completion_tokens_per_q"] for c in cols)),
+             ("가상 비용 USD / 문항", *(c["usd_per_q"] for c in cols)),
+             ("LLM 호출 / 문항", *(c["llm_calls_per_q"] for c in cols)),
+             ("도구 retry (run당)", *(c["retries_total"] for c in cols)),
+             ("라우팅 정확도", *(pct(c.get("route_accuracy")) for c in cols)),
+             ("검증 시도 / 문항", *(c.get("validation_attempts_per_q", "-") for c in cols)),
+             ("검증 실패 → 도구 결과 대체 (run당)", *(c.get("unverified_fallback", "-") for c in cols))]
+    md = (f"# Before / After (같은 데이터·같은 모델, 각 {cols[0]['repeats']}회)\n\n"
+          "문항 수가 다르면 늦게 추가된 문항(v3 역산 G1~G3)이 앞 버전 측정에 없다는 뜻이다.\n\n"
+          f"| 지표 | {' | '.join(l for _, l in names)} |\n|---|{'---|' * len(names)}\n"
+          + "\n".join("| " + " | ".join(map(str, r)) + " |" for r in rows) + "\n")
     (RES / "compare.md").write_text(md, encoding="utf-8")
     return md
 
@@ -152,7 +157,7 @@ def compare() -> str:
 def rescore() -> None:
     """저장된 답변을 현재 골든셋·채점기로 다시 채점한다. 질문이 바뀐 문항이 있으면 재측정이 필요하므로 중단한다."""
     golden = {g["id"]: g for g in (json.loads(l) for l in (ROOT / "eval/golden.jsonl").read_text().splitlines())}
-    for system in ("baseline", "v2"):
+    for system in ("baseline", "v2", "v3"):
         path = RES / f"{system}.jsonl"
         if not path.exists():
             continue
@@ -174,9 +179,10 @@ def rescore() -> None:
 
 def main() -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("system", choices=["baseline", "v2", "compare", "rescore"])
+    ap.add_argument("system", choices=["baseline", "v2", "v3", "compare", "rescore"])
     ap.add_argument("--repeat", type=int, default=3)
     ap.add_argument("--ids", help="쉼표로 구분한 문항 id만 실행(점검용, 결과 파일은 *_pilot로 저장)")
+    ap.add_argument("--missing", action="store_true", help="기존 결과에 없는 문항만 측정해 덧붙임(동결 결과는 그대로)")
     a = ap.parse_args()
     if a.system == "compare":
         print(compare())
@@ -188,7 +194,18 @@ def main() -> None:
     name = a.system
     if a.ids:
         golden, name = [g for g in golden if g["id"] in a.ids.split(",")], f"{a.system}_pilot"
-    rows = asyncio.run(run_system(a.system, golden, a.repeat))
+    prev: list[dict] = []
+    if a.missing:
+        path = RES / f"{name}.jsonl"
+        prev = [json.loads(l) for l in path.read_text().splitlines()]
+        reps = sorted({r["repeat"] for r in prev})
+        if reps != list(range(a.repeat)):
+            raise SystemExit(f"{name}: 기존 결과는 repeat {reps} — 같은 --repeat로 덧붙여야 합니다")
+        done = {r["id"] for r in prev}
+        golden = [g for g in golden if g["id"] not in done]
+        if not golden:
+            raise SystemExit(f"{name}: 새로 측정할 문항이 없습니다")
+    rows = prev + asyncio.run(run_system(a.system, golden, a.repeat))
     with (RES / f"{name}.jsonl").open("w", encoding="utf-8") as f:
         f.writelines(json.dumps(r, ensure_ascii=False) + "\n" for r in rows)
     s = summarize(rows)

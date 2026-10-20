@@ -36,5 +36,8 @@
 {"id": "N18", "difficulty": "hard", "category": "calc", "query": "은행 적금 중 12개월 기본금리 제일 높은 상품에 월 50만원씩 넣으면 세전이자 얼마야?", "gold_ids": ["saving_202609_0010030_03700", "saving_202609_0014674_01012000200000000003"], "retrieval": "any", "check": {"type": "nums_any", "values": [123500]}}
 {"id": "N19", "difficulty": "easy", "category": "follow_up", "setup": "카카오뱅크 26주적금 우대금리 알려줘", "query": "그거 자동이체 실패한 주차를 빈자리채우기로 메우면 성공으로 쳐줘?", "gold_ids": ["saving_202609_0015130_10-01-30-355-0005"], "retrieval": "any", "check": {"type": "text_any", "values": ["인정되지 않", "인정되지않", "인정하지 않", "아니요"]}}
 {"id": "N20", "difficulty": "easy", "category": "follow_up", "setup": "우리SUPER주거래적금 12개월 기본금리 얼마야?", "query": "그거 24개월은?", "gold_ids": ["saving_202609_0010001_WR0001F"], "retrieval": "any", "check": {"type": "nums_any", "values": [2.4]}}
+{"id": "G1", "difficulty": "hard", "category": "goal", "query": "1년 동안 적금으로 1000만원 모으려면 연 3% 단리 기준 매달 얼마 넣어야 해?", "gold_ids": [], "retrieval": null, "check": {"type": "nums_any", "values": [822033]}}
+{"id": "G2", "difficulty": "hard", "category": "goal", "query": "2년 뒤에 예금으로 5000만원 만들려면 연 3.5%로 지금 얼마 넣어야 해?", "gold_ids": [], "retrieval": null, "check": {"type": "nums_any", "values": [47204547]}}
+{"id": "G3", "difficulty": "hard", "category": "goal", "query": "월 100만원씩 갚을 수 있으면 연 4.5%로 30년 원리금균등이면 최대 얼마까지 빌릴 수 있어?", "gold_ids": [], "retrieval": null, "check": {"type": "nums_any", "values": [197361257]}}
 {"id": "C1", "difficulty": "easy", "category": "chat", "query": "안녕! 너는 뭘 도와줄 수 있어?", "gold_ids": [], "retrieval": null, "check": {"type": "nonempty"}}
 {"id": "C2", "difficulty": "easy", "category": "out_of_scope", "query": "오늘 삼성전자 주가 얼마야?", "gold_ids": [], "retrieval": null, "check": {"type": "refusal"}}

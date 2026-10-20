@@ -21,6 +21,9 @@ def test_mcp_tools_resource_prompt_end_to_end():
             loan, _ = await c.call_tool("calculate", {"product_type": "loan", "amount_won": 100_000_000,
                                                       "term_months": 360, "rate_pct": 4.5})
             assert loan.data["result"] == 506685 and loan.data["after_tax"] is None
+            cap, _ = await c.call_tool("calculate", {"product_type": "loan", "amount_won": 506685,
+                                                     "term_months": 360, "rate_pct": 4.5, "mode": "goal"})
+            assert cap.ok and cap.data["name"] == "최대 대출 원금" and 99_999_000 < cap.data["result"] < 100_001_000
             rows, _ = await c.call_tool("query_products", {"kind": "saving", "group": "bank", "term_months": 12,
                                                            "metric": "rate", "limit": 1})
             top = rows.data["rows"]

@@ -21,12 +21,18 @@ from .state import MAX_REPLAN, MAX_REWRITE
 
 TEXT_CUE = r"우대|조건|가입|대상|수수료|연체|한도|해지|유의|방법|언제|누가"
 WINNER_RE = r"제일|가장|더\s*(높|낮|좋|나)|어디|어느|뭐가|1위"
-METRIC_KO = {"rate": "기본금리", "rate_max": "최고금리(우대 포함)", "min": "최저금리", "max": "최고금리"}
+METRIC_KO = {"rate": "기본금리", "rate_max": "최고금리(우대 포함)", "spread": "우대 폭(최고-기본)", "min": "최저금리",
+             "max": "최고금리"}
+
+
+def _unit(metric: str) -> str:
+    return "%p" if metric == "spread" else "%"
 ROUTE_SYSTEM = "금융상품 질문 분류기다. 입력 JSON의 question을 읽고 지정된 JSON 형식으로만 답한다."
 CHAT_SYSTEM = ("금융상품 공시 안내 챗봇이다. 인사·잡담에 한국어 한두 문장으로 답하고, 정기예금·적금·주택담보대출·"
                "전세자금대출·신용대출의 금감원 공시 정보를 비교·계산해 줄 수 있다고 안내한다. 지정된 JSON 형식으로만 답한다.")
 WRITE_SYSTEM = ("금융상품 상담원이다. 입력 JSON의 근거(rows, calculations, documents)만으로 question에 답한다.\n"
                 "- 금리·금액은 근거의 숫자를 그대로 쓰고 직접 계산하거나 반올림하지 않는다. calculations가 있으면 결과를 반드시 쓴다.\n"
+                "- rows가 질문이 묻는 값(기본금리·최고금리·우대 폭)이다. 우대 폭(%p)을 물으면 rows의 %p 값을 먼저 답한다.\n"
                 "- rows는 1위부터 정렬돼 있다. 1위를 묻는 질문이면 1위부터 답하고, 동률이면 모두 말한다.\n"
                 "- citations는 documents.descriptions의 text에서만 글자 그대로 복사한다. rate_table은 인용하지 않는다. "
                 "product_id는 citable_ids 중에서 고르고, 인용할 문장이 없으면 빈 배열로 둔다.\n"
@@ -108,12 +114,13 @@ async def plan_node(state, deps) -> dict:
                                f"{KIND_KO[kind]} {METRIC_KO.get(a.get('metric', ''), '금리')} 조회", a))
     if s.amount_won:
         loan = any(k in LOAN_KINDS for k in s.kinds) or bool(re.search(r"빌리|빌려|대출|갚|상환", q))
-        ptype = "loan" if loan else ("saving" if ("saving" in s.kinds or s.monthly) else "deposit")
+        monthly = s.monthly or bool(re.search(r"매달|매월|월\s*얼마|한\s*달에", q))
+        ptype = "loan" if loan else ("saving" if ("saving" in s.kinds or monthly) else "deposit")
         args = {"product_type": ptype, "amount_won": s.amount_won, "term_months": s.term_months,
                 "rate_pct": s.rate_pct, "interest_type": "compound" if "복리" in q else "simple",
-                "repayment": "bullet" if "만기일시" in q else "equal_payment"}
+                "repayment": "bullet" if "만기일시" in q else "equal_payment", "mode": "goal" if s.goal else "forward"}
         kind = next((k for k in s.kinds if (k in LOAN_KINDS) == loan), None)
-        tasks.append(_task(len(tasks) + 1, "calc", f"{ptype} 계산", args,
+        tasks.append(_task(len(tasks) + 1, "calc", f"{ptype} {'역산' if s.goal else '계산'}", args,
                            rate_query=query_args(kind) if kind else None))
     if re.search(TEXT_CUE, q) or (s.product_ids and not s.compare):
         tasks.append(_task(len(tasks) + 1, "rag", "우대조건·설명 원문 검색"))
@@ -167,8 +174,8 @@ def latest(state) -> dict[str, dict]:
 @traceable(name="replan_check_node")
 async def replan_check_node(state, deps) -> dict:
     """서브에이전트 결과를 모아 본다. 구조화 조회가 0건이면 조건을 한 단계 완화해 다시 보낸다(최대 MAX_REPLAN회)."""
-    if state["route"] != "hard":  # easy 경로는 수집만 하고 넘어간다(계약상 ReplanCheck는 hard 전용)
-        return {}
+    if state["route"] != "hard":  # easy 경로는 이벤트 없이 수집만 한다(계약상 ReplanCheck는 hard 전용)
+        return _spread_followup(state, deps)
     rounds, res = state.get("replan_rounds", 0), latest(state)
     empty = {t["id"] for t in state["tasks"]
              if t["agent"] == "structured" and res[t["id"]]["ok"] and not res[t["id"]]["rows"]}
@@ -188,6 +195,20 @@ async def replan_check_node(state, deps) -> dict:
     return {"tasks": tasks, "replan_rounds": rounds + 1,
             "events": [{"type": "ReplanCheck", "round": rounds, "is_sufficient": False,
                         "reason": f"조회 0건 → 조건 완화: {', '.join(dropped)} 제거"}]}
+
+
+def _spread_followup(state, deps) -> dict:
+    """easy 우대 폭 질문: 근거로 고른 상품(이름이 없으면 검색 1위)의 우대 폭을 구조화 조회로 한 번 더 가져온다.
+    원문에 %p 값이 여러 개라(조건별·합계) 무엇이 답인지 코드로 정해야 속성 혼동을 검증할 수 있다."""
+    s, tasks = Slots(**state["slots"]), state["tasks"]
+    if s.metric != "spread" or any(t["agent"] == "structured" for t in tasks):
+        return {}
+    pid = (s.product_ids or collected(state)[2] or [None])[0]
+    if pid is None:
+        return {}
+    p = deps.catalog.by_id[pid]
+    a = {"kind": p.kind, "metric": "spread", "product_ids": [pid]} | ({"term_months": s.term_months} if s.term_months else {})
+    return {"tasks": tasks + [_task(len(tasks) + 1, "structured", f"{KIND_KO[p.kind]} 우대 폭 조회", a)]}
 
 
 def collected(state) -> tuple[list[dict], list[dict], list[str], list[str]]:
@@ -229,7 +250,7 @@ async def write_node(state, deps) -> dict:
     inp = AnswerInput(
         question=state["query"],
         rows=[RateRow(**{k: r[k] for k in ("product_id", "bank", "product", "option", "value")},
-                      metric=METRIC_KO.get(r["metric"], "대출금리")) for r in rows],
+                      metric=METRIC_KO.get(r["metric"], "대출금리"), unit=_unit(r["metric"])) for r in rows],
         calculations=[Calculation(**c) for c in calcs],
         documents=[product_doc(deps, i) for i in doc_ids], citable_ids=doc_ids,
         procedure=state.get("procedure"), previous_rejection=state.get("feedback"))
@@ -260,11 +281,18 @@ async def validate_node(state, deps) -> dict:
         ok, why = check_answer(d["reply"], allowed_values(inp, state["query"]), [], sections,
                                required=[(c.result, c.after_tax) if c.after_tax is not None else (c.result,)
                                          for c in inp.calculations],
-                               winner=_winner(state["query"], inp.rows, deps.catalog))
+                               winner=_winner(state["query"], inp.rows, deps.catalog),
+                               attribute=_attribute(state["slots"], inp.rows))
     return {"attempts": attempts, "verified": ok, "feedback": why, "insufficient": insufficient, "draft": d,
             "dropped_citations": dropped,
             "events": [{"type": "Validation", "attempt": attempts, "verdict": "pass" if ok else "fail",
                         "reason": why}]}
+
+
+def _attribute(slots: dict, rows: list[RateRow]) -> tuple[str, set[float]] | None:
+    """우대 폭 질문이면 (이름, 허용값). 근거에 최고금리·우대 폭이 함께 있어 숫자 검증만으로는 속성 혼동을 못 막는다."""
+    vals = {round(r.value, 2) for r in rows if r.unit == "%p"}
+    return (METRIC_KO["spread"], vals) if slots.get("metric") == "spread" and vals else None
 
 
 def _winner(query: str, rows: list[RateRow], catalog) -> tuple[list[str], list[str]] | None:
@@ -297,7 +325,7 @@ def _table_reply(rows: list[dict], calcs: list[dict]) -> str:
     out = []
     if rows:
         out.append("공시 데이터 조회 결과예요.")
-        out += [f"{i}. {r['bank']} {r['product']} — {r['option']} {METRIC_KO.get(r['metric'], '대출금리')} {r['value']}%"
+        out += [f"{i}. {r['bank']} {r['product']} — {r['option']} {METRIC_KO.get(r['metric'], '대출금리')} {r['value']}{_unit(r['metric'])}"
                 for i, r in enumerate(rows[:5], 1)]
     for c in calcs:
         tax = f", 세후 {c['after_tax']:,}원" if c.get("after_tax") is not None else ""
@@ -320,19 +348,19 @@ async def finalize_node(state, deps) -> dict:
             extra.append(f"원문과 일치하지 않는 인용 {len(state['dropped_citations'])}건은 제외했어요.")
     elif state.get("insufficient"):
         reply = f"공시 자료만으로는 답하기 어려워요. {state['draft'].get('missing') or ''}".strip()
-    elif route == "hard":
+    elif route == "hard" or rows:
         reply = _table_reply(rows, calcs)
         extra.append("답변이 검증을 통과하지 못해 도구 결과를 그대로 보여드려요.")
     else:
         names = [deps.catalog.by_id[i].name for i in doc_ids]
         reply = "검증된 답을 만들지 못했어요. 아래 상품의 공시 내용을 직접 확인해 주세요: " + ", ".join(names)
-    if route == "hard" and rows:
+    if rows:
         products = []
         for r in rows:
             if r["product_id"] not in {p["id"] for p in products} and len(products) < 3:
                 products.append(_card(deps, r["product_id"], {
                     "label": f"{r['option']} {METRIC_KO.get(r['metric'], '대출금리')}", "value": r["value"],
-                    "unit": "%"}))
+                    "unit": _unit(r["metric"])}))
     else:
         ids = [c["product_id"].strip(" []") for c in cites if c["product_id"].strip(" []") in deps.catalog.by_id] \
             or doc_ids[:1]

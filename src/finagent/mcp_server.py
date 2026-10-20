@@ -17,7 +17,6 @@ from finagent.schemas import Calculation, ToolResult
 
 ROOT = Path(__file__).resolve().parents[2]
 CAT = C.Catalog(parse_all(ROOT / "data/raw"))
-INTEREST_TAX = 0.154  # 일반과세 이자소득세 15.4%(소득세 14% + 지방소득세 1.4%)
 mcp = FastMCP(name="finagent-products")
 
 
@@ -31,7 +30,7 @@ def query_products(kind: str, group: str | None = None, term_months: int | None 
                    banks: list[str] | None = None, filters: dict | None = None, limit: int = 5) -> dict:
     """금융상품을 조건으로 걸러 금리 순으로 정렬한다. 예·적금은 높은 순, 대출은 낮은 순, 1위 동률은 모두 포함.
     kind: deposit|saving|mortgage|rent|credit, group: bank|savingsbank, metric: rate(기본금리)|rate_max(우대 포함
-    최고금리)|min|max(대출), credit은 credit_score 필수. 공시 평균금리는 쓰지 않는다."""
+    최고금리)|spread(우대 폭 %p = 최고 - 기본)|min|max(대출), credit은 credit_score 필수. 공시 평균금리는 쓰지 않는다."""
     try:
         if kind not in KIND_KO:
             raise ValueError(f"kind는 {list(KIND_KO)} 중 하나여야 합니다: {kind}")
@@ -45,12 +44,26 @@ def query_products(kind: str, group: str | None = None, term_months: int | None 
 @mcp.tool()
 def calculate(product_type: Literal["saving", "deposit", "loan"], amount_won: int, term_months: int, rate_pct: float,
               interest_type: Literal["simple", "compound"] = "simple",
-              repayment: Literal["equal_payment", "bullet"] = "equal_payment") -> dict:
+              repayment: Literal["equal_payment", "bullet"] = "equal_payment",
+              mode: Literal["forward", "goal"] = "forward") -> dict:
     """이자·상환액 계산(원). saving=월 납입액 기준 적금 세전/세후 이자, deposit=원금 기준 예금 세전/세후 이자,
-    loan=월 상환액(equal_payment 원리금균등 | bullet 만기일시: 월 이자만). 원 미만 절사(대출은 반올림)."""
+    loan=월 상환액(equal_payment 원리금균등 | bullet 만기일시: 월 이자만). 원 미만 절사(대출은 반올림).
+    mode=goal이면 역산: amount_won이 saving·deposit은 목표 세후 만기 수령액, loan은 월 상환 가능액이고
+    result는 필요한 월 납입액 / 필요한 원금 / 최대 대출 원금이다."""
     try:
         compound = interest_type == "compound"
-        if product_type == "loan":
+        if mode == "goal":
+            if product_type == "loan":
+                result, name = C.loan_capacity(amount_won, term_months, rate_pct, repayment), "최대 대출 원금"
+                formula = "월 상환액(" + ("원리금균등" if repayment == "equal_payment" else "만기일시") + ") ≤ 월 상환 가능액인 최대 원금"
+            else:
+                fn = C.saving_goal if product_type == "saving" else C.deposit_goal
+                result = fn(amount_won, term_months, rate_pct, compound)
+                name = "목표 달성 월 납입액" if product_type == "saving" else "목표 달성 필요 원금"
+                formula = ("월납입 × T" if product_type == "saving" else "원금") + \
+                    " + 세후이자(세전 × (1 - 0.154)) ≥ 목표 금액인 최소 금액, 원 단위"
+            after = None
+        elif product_type == "loan":
             result, after = C.loan_payment(amount_won, term_months, rate_pct, repayment), None
             name = "대출 월 상환액"
             formula = ("원리금균등: 원금 × r / (1 - (1+r)^-T), r=연이율/1200" if repayment == "equal_payment"
@@ -58,13 +71,13 @@ def calculate(product_type: Literal["saving", "deposit", "loan"], amount_won: in
         else:
             fn = C.saving_interest if product_type == "saving" else C.deposit_interest
             result = fn(amount_won, term_months, rate_pct, compound)
-            after = int(result * (1 - INTEREST_TAX))
+            after = C.after_tax(result)
             name = "적금 이자" if product_type == "saving" else "예금 이자"
             formula = ("월복리" if compound else ("월납입 × T(T+1)/2 × 연이율 / 1200" if product_type == "saving"
                                                  else "원금 × 연이율 × T / 1200")) + ", 원 미만 절사, 세후 = 세전 × (1 - 0.154)"
         calc = Calculation(name=name, result=result, after_tax=after, inputs={
             "product_type": product_type, "amount_won": amount_won, "term_months": term_months,
-            "rate_pct": rate_pct, "interest_type": interest_type, "repayment": repayment}, formula=formula)
+            "rate_pct": rate_pct, "interest_type": interest_type, "repayment": repayment, "mode": mode}, formula=formula)
         return ToolResult(ok=True, tool_name="calculate", data=calc.model_dump()).model_dump()
     except ValueError as e:
         return _fail("calculate", e)

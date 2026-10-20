@@ -179,3 +179,52 @@ def test_split_citations_keeps_only_verbatim_quotes():
     assert kept == [{"product_id": "p", "quote": "급여 0.5%p"}] and len(dropped) == 2
 
 
+
+
+def test_spread_metric_and_attribute_check():
+    cat = Catalog([_saving("A", "1", "가은행", "가나적금", 3.0)])
+    assert cat.query("saving", metric="spread")[0]["value"] == 1.0
+    assert extract("가나적금 우대금리 최고 몇 %p야?", cat).metric == "spread"
+    assert extract("가나적금 최고금리 얼마야?", cat).metric == "rate_max"
+    attr = ("우대 폭", {1.0})
+    ok, why = check_answer("최고금리는 4.0%예요", allowed([1.0, 4.0]), [], {}, attribute=attr)
+    assert not ok and "1%p" in why
+    assert check_answer("우대 폭은 1.0%p, 최고금리 4.0%예요", allowed([1.0, 4.0]), [], {}, attribute=attr)[0]
+
+
+@pytest.mark.skipif(not HAS_RAW, reason="data/raw 없음")
+def test_spread_matches_golden_preferential_margin():
+    """금리표 차이(최고-기본)가 설명 원문의 우대 폭과 같다 — v2 오답 4문항(E2·S3·S4·N10) 실데이터 확인."""
+    cat = Catalog(parse_all(ROOT / "data/raw"))
+    golden = {json.loads(l)["id"]: json.loads(l) for l in (ROOT / "eval/golden.jsonl").read_text().splitlines()}
+    for gid in ("E2", "S3", "S4", "N10"):
+        g = golden[gid]
+        rows = cat.query("saving", metric="spread", product_ids=g["gold_ids"], term_months=extract(g["query"], cat).term_months)
+        assert rows[0]["value"] == g["check"]["values"][0], gid
+
+
+@pytest.mark.parametrize("target,term,rate,compound", [(10_000_000, 12, 3.0, False), (10_000_000, 24, 4.2, True),
+                                                       (1_000_000, 6, 2.0, False)])
+def test_saving_and_deposit_goal_are_minimal(target, term, rate, compound):
+    from finagent.catalog import after_tax, deposit_goal, saving_goal
+    total_s = lambda m: m * term + after_tax(saving_interest(m, term, rate, compound))
+    m = saving_goal(target, term, rate, compound)
+    assert total_s(m) >= target > total_s(m - 1)  # 왕복: 정방향으로 다시 계산하면 목표 이상, 1원 적으면 미달
+    total_d = lambda p: p + after_tax(deposit_interest(p, term, rate, compound))
+    p = deposit_goal(target, term, rate, compound)
+    assert total_d(p) >= target > total_d(p - 1)
+
+
+@pytest.mark.parametrize("method", ["equal_payment", "bullet"])
+def test_loan_capacity_is_maximal(method):
+    from finagent.catalog import loan_capacity
+    p = loan_capacity(1_000_000, 360, 4.5, method)
+    assert loan_payment(p, 360, 4.5, method) <= 1_000_000 < loan_payment(p + 1, 360, 4.5, method)
+
+
+def test_goal_rejects_bad_input():
+    from finagent.catalog import loan_capacity, saving_goal
+    with pytest.raises(ValueError):
+        saving_goal(0, 12, 3.0)
+    with pytest.raises(ValueError):
+        loan_capacity(1_000_000, 0, 4.5)
