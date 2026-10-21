@@ -198,7 +198,7 @@ async def r_agent(st: TaskState, deps) -> dict:
     )
     usage, error = [], None
     try:
-        with llm_errors():
+        with llm_errors(usage=deps.agent.usage):
             out = await agent.ainvoke({"messages": [HumanMessage(prompt)]})
         usage = [
             deps.agent.usage(m)
@@ -207,6 +207,8 @@ async def r_agent(st: TaskState, deps) -> dict:
         ]
     except LLMOutputError as e:  # 숨기지 않고 남긴 뒤 검색 순서로 마무리한다
         error = str(e)
+        if e.usage is not None:
+            usage.append(e.usage)
     if ev.picked:
         why = None
     else:  # 판단 상한·형식 오류·빈 선택 — 사실을 남기고 검색 순서로 고른다
@@ -240,7 +242,7 @@ async def r_agent(st: TaskState, deps) -> dict:
 # ---------------- calc ----------------
 @traceable(name="calc.resolve_rate")
 async def c_resolve(st: TaskState, deps) -> dict:
-    """calc 1단계: 금리가 주어지지 않았으면 rate_query로 1위 상품 금리를 조회해 채운다."""
+    """calc 1단계: 조회한 연이율과 실제 상품의 계산 방식을 함께 검증해 채운다."""
     t, t0 = st["task"], time.perf_counter()
     args, retries = dict(t["args"]), 0
     if args.get("rate_pct") is not None:
@@ -259,12 +261,47 @@ async def c_resolve(st: TaskState, deps) -> dict:
             }
         }
     top = res.data["rows"][0]
+    work = {"t0": t0, "retries": retries}
+    metric = top["metric"]
+    loan = args["product_type"] == "loan"
+    annual_rate = (
+        metric in ("min", "max") or metric.startswith("대출금리@")
+        if loan
+        else metric in ("rate", "rate_max")
+    )
+    key = "repayment" if loan else "interest_type"
+    source = top.get(key)
+    requested = args.get(key)
+    label = "상환방식" if loan else "이자 방식"
+    error = None
+    if not annual_rate:
+        error = (
+            "우대 폭·평균금리는 계산 연이율로 사용할 수 없습니다. "
+            "기본금리·최고금리 또는 대출 구간 금리를 지정해 주세요."
+        )
+    elif (source is not None and requested not in (None, source)) or (
+        loan
+        and top.get("rpay_type_nm") == "분할상환방식"
+        and requested == "bullet"
+    ):
+        error = (
+            f"요청한 {label}이 공시 옵션({top['option']})과 충돌합니다. "
+            "해당 방식의 상품을 지정해 주세요."
+        )
+    elif source is None and (not loan or requested is None):
+        error = f"공시에서 계산할 {label}을 확정할 수 없습니다. " + (
+            "원리금균등 또는 만기일시 중 상환방식을 알려주세요."
+            if loan
+            else "단리·복리 방식이 명시된 상품을 지정해 주세요."
+        )
+    if error:
+        return {"work": {**work, "error": error, "clarify": error}}
+    args[key] = requested or source
     args["rate_pct"] = top["value"]
     return {
         "work": {
-            "t0": t0,
+            **work,
             "args": args,
-            "retries": retries,
             "rate_from": f"{top['bank']} {top['product']} {top['option']}",
             "rate_row": top,
         }
@@ -286,7 +323,14 @@ async def c_check(st: TaskState, deps) -> dict:
     """calc 3단계: 계산 결과를 점검해 결과로 남긴다(도구 실패·0 이하는 ok=False)."""
     w, t = st["work"], st["task"]
     if w.get("error"):
-        return _done(t, w["t0"], False, w["retries"], w["error"])
+        return _done(
+            t,
+            w["t0"],
+            False,
+            w["retries"],
+            w["error"],
+            clarify=w.get("clarify"),
+        )
     res = ToolResult(**w["res"])
     if not res.ok:
         return _done(t, w["t0"], False, w["retries"], res.error)

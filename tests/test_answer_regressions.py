@@ -93,7 +93,7 @@ def test_credit_answer_uses_selected_grade_and_type_not_another_rate(catalog):
         (
             "월급 받는 통장을 우리은행으로 옮기면 우리SUPER주거래적금 "
             "금리 얼마나 더 붙어?",
-            "기본금리는 2.45%이고 급여이체 우대는 0.7%p입니다.",
+            "급여이체 우대는 0.3%p입니다.",
             "급여이체 우대는 0.7%p입니다.",
             "급여",
         ),
@@ -108,7 +108,7 @@ def test_credit_answer_uses_selected_grade_and_type_not_another_rate(catalog):
 def test_specific_condition_rejects_overall_rate_and_rewrites(
     catalog, query, wrong, correct, reason
 ):
-    """개별 우대조건 질문에 전체 금리로 답하면 반려되고 재작성에서 고쳐진다."""
+    """개별 우대조건 질문에 다른 조건·전체 우대 폭의 값으로 답하면 반려되고 재작성에서 고쳐진다."""
     final, state, llm = run(catalog, query, wrong, correct)
     validations = [e for e in state["events"] if e["type"] == "Validation"]
     assert [e["verdict"] for e in validations] == ["fail", "pass"]
@@ -230,7 +230,8 @@ def test_condition_matching_does_not_override_explicit_rate_or_guess_ambiguous_c
     doc = product_doc(deps, pid)
     assert condition_rate("급여이체하면 기본금리는?", [doc]) is None
     assert condition_rate("급여이체하면 최고금리는?", [doc]) is None
-    assert condition_rate("급여이체와 신규고객 우대 얼마?", [doc]) is None
+    # 두 조건이 똑같이 겹치면 어느 쪽인지 정하지 않는다.
+    assert condition_rate("급여이체랑 공과금 자동이체 우대 얼마?", [doc]) is None
     doc.descriptions = [
         Description(section="우대조건", text="급여 이체 0.5%p 또는 0.7%p")
     ]

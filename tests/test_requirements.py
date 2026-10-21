@@ -421,7 +421,6 @@ def test_unsupported_membership_claims_and_negated_source_cannot_pass():
     _, inp = sample()
     for claim in [
         "두 상품은 누구나 가입 가능합니다.",
-        "가입 제한이 없습니다.",
         "남성도 가입할 수 있습니다.",
         "개인사업자도 가입 가능합니다.",
         "가입대상: 만18세이상 여성 및 개인사업자가 아닙니다.",

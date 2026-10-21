@@ -35,11 +35,9 @@ def _fail(tool: str, e: Exception) -> dict:
 @mcp.tool(
     title="금융상품 금리 조회",
     annotations=READ_ONLY,
-    description="조건에 맞는 상품을 상품당 최적 옵션 1행씩 금리 순으로 "
-    "돌려준다(예·적금 높은 순, 대출 낮은 순, "
-    "limit 경계 동률 포함). 공시 평균금리는 쓰지 않는다. data.rows = "
-    "[{product_id, bank, product, "
-    "group, kind, metric, value, option}]",
+    description="상품별 최적 옵션을 금리순으로 조회(예적금 높은 순, 대출 낮은 순, 동률 포함). "
+    "평균금리 제외. rows: product_id, bank, product, group, kind, metric, value, "
+    "option, interest_type, repayment, rpay_type_nm. 불명확한 계산 방식은 null.",
 )
 def query_products(
     kind: Annotated[
@@ -77,7 +75,8 @@ def query_products(
     filters: Annotated[
         dict[str, str] | None,
         Field(
-            description="옵션 필터. saving: rsrv_type_nm / mortgage: mrtg_type_nm, "
+            description="옵션 필터. 예적금: rate_type_nm(단리|복리), "
+            "saving: rsrv_type_nm / mortgage: mrtg_type_nm, "
             "rpay_type_nm, "
             "lend_rate_type_nm / rent: rpay_type_nm, lend_rate_type_nm / "
             "credit: crdt_prdt_type(1 일반|2 마이너스|3 카드론)"

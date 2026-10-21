@@ -32,7 +32,7 @@ def parse_output(text: str, out: type[T]) -> T:
 
 
 @contextmanager
-def llm_errors():
+def llm_errors(usage=None):
     """SDK 오류를 앱 오류 종류(시간 초과·연결 실패·형식 오류)로 바꾼다. create_agent 호출도 같이 쓴다."""
     try:
         yield
@@ -47,31 +47,71 @@ def llm_errors():
         LengthFinishReasonError,
         ContentFilterFinishReasonError,
     ) as e:
-        raise LLMOutputError(f"LLM 구조화 응답 오류: {type(e).__name__}") from e
+        completion = getattr(e, "completion", None)
+        observed = (
+            usage(completion)
+            if usage and completion is not None and completion.usage is not None
+            else None
+        )
+        raise LLMOutputError(
+            f"LLM 구조화 응답 오류: {type(e).__name__}", usage=observed
+        ) from e
 
 
-def _invoke(model, messages, **kwargs):
+def _invoke(model, messages, *, usage=None, **kwargs):
     """모델을 호출하고 SDK 오류를 앱 오류 종류로 바꾼다."""
-    with llm_errors():
+    with llm_errors(usage):
         return model.invoke(messages, **kwargs)
 
 
-def _structured(model, schema, messages, **options):
-    """JSON Schema 구조화 출력으로 호출해 (파싱 결과, 원본 메시지)를 돌려준다. 파싱 실패·거절은 LLMOutputError."""
-    runnable = model.with_structured_output(
-        schema, method="json_schema", include_raw=True, **options
+def _structured(model, schema, messages, *, usage, **options):
+    """원본 사용량을 확보한 뒤 스키마를 검증해 (파싱 결과, 원본, 사용량)을 돌려준다."""
+    out = (
+        schema
+        if isinstance(schema, type) and issubclass(schema, BaseModel)
+        else None
     )
-    result = _invoke(runnable, messages)
+    runnable = model.with_structured_output(
+        # SDK가 먼저 Pydantic 검증하면 오류 응답의 원본·사용량이 사라진다.
+        out.model_json_schema() if out else schema,
+        method="json_schema",
+        include_raw=True,
+        **options,
+    )
+    result = _invoke(runnable, messages, usage=usage)
+    observed = usage(result["raw"])
     if result["parsing_error"] is not None or result["parsed"] is None:
         raise LLMOutputError(
-            "LLM 구조화 응답이 스키마를 따르지 않거나 응답을 거절했습니다"
+            "LLM 구조화 응답이 스키마를 따르지 않거나 응답을 거절했습니다",
+            usage=observed,
         ) from result["parsing_error"]
-    return result["parsed"], result["raw"]
+    try:
+        parsed = (
+            out.model_validate_json(result["raw"].text)
+            if out
+            else result["parsed"]
+        )
+    except ValidationError as e:
+        raise LLMOutputError(
+            "LLM 구조화 응답 오류: ValidationError", usage=observed
+        ) from e
+    return parsed, result["raw"], observed
 
 
 def _usage(message, name: str, usd_in: float, usd_out: float) -> dict:
     """응답 메시지의 토큰 사용량과 비용(USD)을 계산한다. 사용량이 없으면 LLMOutputError."""
-    usage = message.usage_metadata
+    if hasattr(message, "usage_metadata"):
+        usage = message.usage_metadata
+    else:  # OpenAI SDK의 길이·필터 오류에는 원본 completion이 붙는다.
+        raw = message.usage
+        usage = (
+            {
+                "input_tokens": raw.prompt_tokens,
+                "output_tokens": raw.completion_tokens,
+            }
+            if raw is not None
+            else None
+        )
     if usage is None:
         raise LLMOutputError("LLM 토큰 사용량이 응답에 없습니다")
     p, c = usage["input_tokens"], usage["output_tokens"]
@@ -138,21 +178,27 @@ class OllamaLLM:
         """일반 호출. schema가 있으면 그 JSON Schema로 출력을 강제한다. (텍스트, 사용량)을 돌려준다."""
         messages = [("system", system), ("human", user)]
         if schema is None:
-            message = _invoke(self.client, messages, stream=False)
+            message = _invoke(
+                self.client, messages, usage=self.usage, stream=False
+            )
+            usage = self.usage(message)
         else:
-            _, message = _structured(self.client, schema, messages)
-        return message.text, self.usage(message)
+            _, message, usage = _structured(
+                self.client, schema, messages, usage=self.usage
+            )
+        return message.text, usage
 
     def structured(
         self, system: str, payload: BaseModel, out: type[T]
     ) -> tuple[T, dict]:
         """입력 모델을 프롬프트로 보내고 출력 모델로 파싱해 (결과, 사용량)을 돌려준다."""
-        parsed, raw = _structured(
+        parsed, _, usage = _structured(
             self.client,
             out,
             [("system", system), ("human", payload.to_prompt())],
+            usage=self.usage,
         )
-        return parsed, self.usage(raw)
+        return parsed, usage
 
 
 # USD/1K 토큰 (입력, 출력). OpenAI 공개 단가 — 목록에 없는 모델은 비용을 지어내지 않고 시작할 때 실패한다.
@@ -232,27 +278,30 @@ class OpenAILLM:
         """일반 호출. schema가 있으면 strict JSON Schema로 출력을 강제한다. (텍스트, 사용량)을 돌려준다."""
         messages = [("system", system), ("human", user)]
         if schema is None:
-            message = _invoke(self.client, messages)
+            message = _invoke(self.client, messages, usage=self.usage)
+            usage = self.usage(message)
         else:
-            _, message = _structured(
+            _, message, usage = _structured(
                 self.client,
                 {**schema, "title": schema_name},
                 messages,
+                usage=self.usage,
                 strict=True,
             )
-        return message.text, self.usage(message)
+        return message.text, usage
 
     def structured(
         self, system: str, payload: BaseModel, out: type[T]
     ) -> tuple[T, dict]:
         """strict JSON Schema로 호출해 (출력 모델, 사용량)을 돌려준다."""
-        parsed, raw = _structured(
+        parsed, _, usage = _structured(
             self.client,
             out,
             [("system", system), ("human", payload.to_prompt())],
+            usage=self.usage,
             strict=True,
         )
-        return parsed, self.usage(raw)
+        return parsed, usage
 
 
 def build_llm(cfg):

@@ -37,6 +37,7 @@ const { input, send, retry, stop } = useChatStream(
   save,
   streaming,
   preview,
+  sessionState.editSession,
 );
 const { health, clock, month, status, checkHealth } = useServiceStatus();
 const records = computed(() =>
@@ -86,10 +87,10 @@ function selectSession(id) {
   sidebarOpen.value = false;
   scrollLatest();
 }
-function deleteSession(id) {
+async function deleteSession(id) {
   if (streaming.value) return;
   const wasLast = recordedSessions.value.length === 1;
-  sessionState.deleteSession(id);
+  await sessionState.deleteSession(id);
   if (wasLast) {
     view.value = "chat";
     sidebarOpen.value = false;

@@ -90,7 +90,7 @@ def make_app(llm, version="v2", tmp=":memory:"):
 
 def test_stream_v2_easy_follows_contract_and_remembers_thread(tmp_path):
     """v2 스트림이 계약을 지키고 같은 thread의 대화를 기억한다."""
-    ok = {"ok": True, "reply": "연 0.5%p예요", "citations": [], "missing": ""}
+    ok = {"ok": True, "reply": "급여 이체 시 연 0.5%p예요", "citations": [], "missing": ""}
     rewrite = {
         "follow_up": True,
         "question": "가나적금 가입 방법은?",

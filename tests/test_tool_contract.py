@@ -82,12 +82,13 @@ def test_check_answer_reports_every_reason_at_once():
         {"pct": {3.2, 2.45}, "won": set()},
         [],
         {},
-        winner=(["가은행"], ["가은행", "나은행"]),
+        winner=([["가은행"]], ["가은행", "나은행"]),
     )
     assert (
         not ok
         and why.startswith("1. 근거에 없는 수치")
-        and "2. 조회 1위는 가은행" in why
+        and "2. 조회 1위 가은행" in why
+        and "3. '나은행이 9.9%로 가장 높아요'에서 1위가 아닌" in why
     )
 
 

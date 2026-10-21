@@ -1,6 +1,6 @@
 # API 계약 (백엔드 ↔ 프론트)
 
-- 버전: **0.8.0** (2026-10-21)
+- 버전: **0.10.0** (2026-10-21)
 - 백엔드 `127.0.0.1:8100`, 프론트는 8600에서 같은 경로로 프록시한다.
 - 예시 스트림: `doc/contract/stream_easy.sse`, `stream_hard.sse`, `stream_error.sse`, `stream_v1.sse`
 
@@ -8,6 +8,8 @@
 
 | 버전 | 날짜 | 변경 |
 |---|---|---|
+| 0.10.0 | 2026-10-21 | 검증 기준 정리: 대상·조건·항목·수치·단위가 틀리면 반려, 표·순서·의역은 허용. 근거와 연결하지 못한 수치·설명은 반려하지 않고 `Validation.unverified`(선택, 문자열 배열)로 알리며 답 끝에 확인 안내를 붙임. 답에 쓴 계산식이 틀리면 반려. 미래 금리 확정 질문은 거절 응답. 이자 계산 Decimal 절사(원 미만 버림). 추가 필드만 있어 기존 클라이언트 호환 |
+| 0.9.0 | 2026-10-21 | 사용자 조회 조건을 자동 완화하지 않음. 계산용 연이율과 우대 폭 분리, 상품 이자·상환 방식 보존, 후속 계산 조건 유지, 상품·기간·금리 종류별 근거 검증. 실패한 모델 응답 사용량도 합산. 외부 응답 필드 유지; 내부 MCP 조회 행에 `interest_type`, `repayment`, `rpay_type_nm` 선택 필드 추가 |
 | 0.8.0 | 2026-10-21 | `POST /sessions/reset`로 해당 대화의 서버 이력·슬롯 초기화. 같은 대화 요청과 초기화는 직렬 처리. 화면은 성공 후 새 ID로 전환하고 실패 시 기존 대화를 보존. 가입정보의 근거 없는 추가 주장·원문 부정 반려 및 비교 대상 밖 검색 후보 제외 |
 | 0.7.0 | 2026-10-21 | `metadata.writing_runs`에 작성 회차별 입력·출력 토큰 및 제공 가능한 모델 로딩·입력 처리·생성 시간(ms) 추가. 명시적 가입정보 인용은 원문에서 코드로 구성. 대화는 본문·카드, 분석·출처는 별도 화면 |
 | 0.6.0 | 2026-10-21 | `RouteDecided.intent` 추가(`recall`, `finance_followup`, `finance_new`, `chat`, `out_of_scope`). 검증 범위에 명시적 요청 항목의 누락 검사 추가. 회상은 상품 카드 없이 대화 기록에서 응답 |
@@ -55,7 +57,7 @@
 | `PlanCreated` | hard만 | `tasks`: `[{id, agent, desc}]`, agent = `structured` \| `rag` \| `calc`; `planner`: `llm` \| `rule` (LLM 계획이 실패하면 `rule`이고 `reason`에 이유), `reason`: 문자열, `removed`: 문자열 배열 |
 | `TaskCompleted` | 조사 작업마다 | `id`, `agent`, `ok`: bool, `retries`: int, `elapsed_ms`: int, `error`: 문자열 \| null (실패 원문. 개발·추적용이며 사용자 화면에는 `FinalAnswer.warnings`의 고정 문구만 보인다) |
 | `ReplanCheck` | hard만 | `round`: int, `is_sufficient`: bool, `reason`: 문자열 |
-| `Validation` | 답 작성 후 | `attempt`: int, `verdict`: `pass` \| `fail`, `reason`: 문자열 \| null |
+| `Validation` | 답 작성 후 | `attempt`: int, `verdict`: `pass` \| `fail`, `reason`: 문자열 \| null, `unverified`(선택): 근거와 연결하지 못한 수치·설명 목록 |
 | `AnswerProgress` | 각 답변 작성 시작 및 작성 종료 후 검증 직전 | `stage`: `writing` \| `validating`, `attempt`: int. `validating`에는 `writing_ms`: int (해당 회차 작성 시간, LLM 호출·입력 준비 포함) |
 
 `route` 의미: `chat` 인사·잡담(검색 없음), `out_of_scope` 금융상품 범위 밖(정중히 거절),

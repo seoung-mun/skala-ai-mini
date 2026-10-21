@@ -343,20 +343,21 @@ def test_compare_and_calc_run_as_parallel_subagents():
     assert final["products"][0]["product"] == "다라적금"
 
 
-def test_hard_compare_replans_once_when_filter_returns_nothing():
-    """조회가 0건이면 조건을 한 번 완화해 다시 조회한다."""
+def test_hard_compare_preserves_filters_when_nothing_matches():
+    """조회가 0건이면 요청 조건을 보존하고 결과 없음을 알린다."""
     final, st = run(
         "은행 적금 중에 24개월 기본금리 제일 높은 거 뭐야?",
-        FakeLLM(ans("다라적금이 3.2%로 가장 높아요")),
+        FakeLLM(),
     )
     assert [
         e["is_sufficient"] for e in st["events"] if e["type"] == "ReplanCheck"
-    ] == [False, True]
-    assert final["products"][0]["product"] == "다라적금"
+    ] == [False]
+    assert not final["products"] and "찾지 못" in final["reply"]
+    assert st["tasks"][0]["args"]["term_months"] == 24
 
 
 def test_compare_answer_picking_non_top_product_is_rejected():
-    """비교 질문에 1위가 아닌 상품을 먼저 답하면 반려된다."""
+    """비교 질문에 1위가 아닌 상품을 '가장 높다'고 답하면 반려된다(서술 순서는 보지 않는다)."""
     final, st = run(
         "은행 적금 중에 12개월 기본금리 제일 높은 거 뭐야?",
         FakeLLM(
@@ -365,7 +366,8 @@ def test_compare_answer_picking_non_top_product_is_rejected():
         ),
     )
     reasons = [e["reason"] for e in st["events"] if e["type"] == "Validation"]
-    assert reasons[0].startswith("조회 1위는 다라적금") and reasons[1] is None
+    assert "1위가 아닌 상품을 1위로" in reasons[0] and reasons[1] is None
+    assert "다라적금" in reasons[0]
 
 
 def test_hard_fallback_table_when_validation_keeps_failing():
@@ -408,7 +410,7 @@ def test_tool_failure_is_reported_not_hidden():
 def test_follow_up_inherits_previous_product():
     """후속 질문은 직전 상품을 이어받는다."""
     prev = {"kinds": ["saving"], "product_ids": [A], "banks": [], "group": None}
-    final, st = run("그거 우대조건은?", FakeLLM(ans("연 0.5%p예요")), prev=prev)
+    final, st = run("그거 우대조건은?", FakeLLM(ans("급여 이체 시 연 0.5%p예요")), prev=prev)
     assert final["route"] == "easy" and st["slots"]["product_ids"] == [A]
 
 
@@ -419,7 +421,7 @@ def test_named_product_skips_retrieval_but_unnamed_question_searches():
         """질문을 실행하고 (검색기 호출 기록, 상태)를 돌려준다."""
         r = FakeRetriever([A, B])
         deps = Deps(
-            llm=FakeLLM(ans("연 0.5%p예요")),
+            llm=FakeLLM(ans("급여 이체 시 연 0.5%p예요")),
             mcp=FakeMCP(),
             retriever=r,
             catalog=CAT,

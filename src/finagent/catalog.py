@@ -5,6 +5,7 @@ from __future__ import annotations
 import math
 import re
 from dataclasses import dataclass
+from decimal import ROUND_FLOOR, ROUND_HALF_UP, Decimal
 
 from .parser import GRADES, Product
 
@@ -36,6 +37,13 @@ METRICS = {
     "rent": ("min", "max"),
     "credit": (),
 }
+METRIC_KO = {
+    "rate": "기본금리",
+    "rate_max": "최고금리(우대 포함)",
+    "spread": "우대 폭(최고-기본)",
+    "min": "최저금리",
+    "max": "최고금리",
+}
 # 이름이 이 분류어뿐인 상품('신용대출', 'e-정기예금')은 질문 속 분류어와 구분이 안 돼 은행명 없이 매칭하지 않는다.
 CATEGORY_RE = (
     r"일반신용대출|마이너스한도대출|장기카드대출|신용대출|한도대출|카드론|주택담보대출|담보대출|전세자금대출|"
@@ -44,8 +52,8 @@ CATEGORY_RE = (
 CREDIT_TYPE = {"일반": "1", "마이너스": "2", "카드론": "3"}
 # 종류별로 쓸 수 있는 옵션 필터 키. 이 밖의 키는 조회에서 오류다(조용히 무시하지 않는다).
 FILTER_KEYS = {
-    "saving": ("rsrv_type_nm",),
-    "deposit": (),
+    "saving": ("rsrv_type_nm", "rate_type_nm"),
+    "deposit": ("rate_type_nm",),
     "mortgage": ("mrtg_type_nm", "rpay_type_nm", "lend_rate_type_nm"),
     "rent": ("rpay_type_nm", "lend_rate_type_nm"),
     "credit": ("crdt_prdt_type",),
@@ -225,6 +233,14 @@ class Catalog:
                         else f"대출금리@{grade}",
                         "value": best[0],
                         "option": _option_label(kind, best[1], grade),
+                        "interest_type": {
+                            "단리": "simple",
+                            "복리": "compound",
+                        }.get(best[1].get("rate_type_nm")),
+                        "repayment": "bullet"
+                        if best[1].get("rpay_type_nm") == "만기일시상환방식"
+                        else None,
+                        "rpay_type_nm": best[1].get("rpay_type_nm"),
                     }
                 )
         rows.sort(
@@ -261,7 +277,8 @@ def _option_ok(kind: str, o: dict, term: int | None, f: dict) -> bool:
     return all(
         o.get(k) == v
         for k, v in f.items()
-        if k in ("mrtg_type_nm", "rpay_type_nm", "lend_rate_type_nm")
+        if k
+        in ("mrtg_type_nm", "rpay_type_nm", "lend_rate_type_nm", "rate_type_nm")
     )
 
 
@@ -314,22 +331,28 @@ def _check(**kw):
             raise ValueError(f"{k}는 0보다 커야 합니다: {v}")
 
 
+def _d(x) -> Decimal:
+    """float 금리·금액을 표기 그대로 Decimal로 바꾼다(2.8 -> Decimal('2.8'), 이진 오차 없음)."""
+    return Decimal(str(x))
+
+
+def _floor(x: Decimal) -> int:
+    """원 미만 절사."""
+    return int(x.to_integral_value(rounding=ROUND_FLOOR))
+
+
 def saving_interest(
     monthly_won: int, term_months: int, rate_pct: float, compound: bool = False
 ) -> int:
     """적금 세전이자(원, 원 미만 절사). 단리: 월납입 × T(T+1)/2 × 연이율/1200. 복리: 월복리 누적."""
     _check(monthly_won=monthly_won, term_months=term_months, rate_pct=rate_pct)
+    m, r = _d(monthly_won), _d(rate_pct) / 1200
     if compound:
-        r = rate_pct / 1200
-        return math.floor(
-            sum(
-                monthly_won * ((1 + r) ** k - 1)
-                for k in range(1, term_months + 1)
-            )
+        return _floor(
+            sum(m * ((1 + r) ** k - 1) for k in range(1, term_months + 1))
         )
-    return math.floor(
-        monthly_won * term_months * (term_months + 1) / 2 * rate_pct / 1200
-    )
+    # 나눗셈은 마지막에 한 번만 한다(무한소수 중간값의 반올림이 절사 결과를 바꾸지 않게).
+    return _floor(m * term_months * (term_months + 1) * _d(rate_pct) / 2400)
 
 
 def deposit_interest(
@@ -342,11 +365,10 @@ def deposit_interest(
     _check(
         principal_won=principal_won, term_months=term_months, rate_pct=rate_pct
     )
+    p, r = _d(principal_won), _d(rate_pct) / 1200
     if compound:
-        return math.floor(
-            principal_won * ((1 + rate_pct / 1200) ** term_months - 1)
-        )
-    return math.floor(principal_won * rate_pct * term_months / 1200)
+        return _floor(p * ((1 + r) ** term_months - 1))
+    return _floor(p * _d(rate_pct) * term_months / 1200)
 
 
 def loan_payment(
@@ -359,12 +381,14 @@ def loan_payment(
     _check(
         principal_won=principal_won, term_months=term_months, rate_pct=rate_pct
     )
-    r = rate_pct / 1200
+    p, r = _d(principal_won), _d(rate_pct) / 1200
     if method == "bullet":
-        return round(principal_won * r)
-    if method != "equal_payment":
+        payment = p * r
+    elif method == "equal_payment":
+        payment = p * r / (1 - (1 + r) ** -term_months)
+    else:
         raise ValueError(f"지원하지 않는 상환방식: {method}")
-    return round(principal_won * r / (1 - (1 + r) ** -term_months))
+    return int(payment.to_integral_value(rounding=ROUND_HALF_UP))
 
 
 # ---------- 역산(목표 → 필요 금액) ----------
@@ -373,7 +397,7 @@ INTEREST_TAX = 0.154  # 일반과세 이자소득세 15.4%(소득세 14% + 지�
 
 def after_tax(interest: int) -> int:
     """세전이자에서 이자소득세 15.4%를 뺀 세후이자(원 미만 절사)."""
-    return int(interest * (1 - INTEREST_TAX))
+    return _floor(_d(interest) * (1 - _d(INTEREST_TAX)))
 
 
 def _least(ok, hi: int) -> int:

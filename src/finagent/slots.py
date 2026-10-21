@@ -22,6 +22,17 @@ FINANCE_RE = r"금리|이자|우대|대출|예금|적금|은행|뱅크|가입|�
 COMPARE_RE = r"제일|가장|비교|중에|중\s|순서|순위|추천|어디|어느|뭐가\s*나아|더\s*높|더\s*낮|\d+\s*개\s*(보여|알려)"
 # 최대 우대 폭(%p)을 묻는 질문 — 최고금리(%)와 구분. "자동이체하면 몇 %p?"처럼 조건 하나를 묻는 질문은 제외
 SPREAD_RE = r"우대\s*(금리\s*)?폭|(최고|최대).*(%\s*p|퍼센트\s*포인트)"
+# "저축은행은 제외하고", "은행 말고" 같은 금융권 제외 표현
+EXCLUDE_RE = r"\s*(?:은|는|을|를|이|가|도)?\s*(?:제외|빼고|말고|아닌)"
+# 미래 시점 금리를 확정·예측해 달라는 질문. 공시는 현재 값만 있어 답할 수 없다.
+FUTURE_RE = (
+    r"(?:내년|다음\s*(?:달|해|분기)|\d+\s*(?:개월|년)\s*(?:뒤|후)|앞으로|미래|이맘때)"
+    r".*(?:금리|이율).*(?:확정|정확히|예측|오를|오르|내릴|떨어|될지|바뀔)"
+)
+# "기본금리나 전체 우대 폭은 빼고"처럼 제외한 항목은 묻는 금리 종류로 읽지 않는다.
+EXCLUDED_ITEM_RE = (
+    r"(?:[^\s.?!,]+\s+){0,3}[^\s.?!,]+?(?:은|는|을|를)\s*(?:빼고|제외하고|말고)"
+)
 GOAL_RE = r"모으려면|모으고\s*싶|모을\s*수|만들려면|목표|얼마까지\s*빌|최대\s*얼마.*빌|갚을\s*수\s*있"  # 역산 계산
 CALC_RE = r"이자\s*(얼마|는)|얼마나\s*(돼|받|붙)|상환액|한\s*달에\s*얼마|월\s*얼마|갚으면|빌리면|빌려서|넣으면|세전이자|만기에\s*얼마"
 
@@ -64,6 +75,22 @@ def months(text: str) -> int | None:
     return int(years or 0) * 12 + int(extra or single or 0) + (6 if half else 0)
 
 
+def _group(q: str) -> str | None:
+    """금융권(bank·savingsbank)을 고른다. 제외 표현이 붙은 금융권은 고르지 않는다."""
+    savings = re.search(r"저축은행", q)
+    savings_out = bool(re.search("저축은행" + EXCLUDE_RE, q))
+    bank_out = bool(re.search(r"(?<!저축)은행" + EXCLUDE_RE, q))
+    if savings and not savings_out:
+        return "savingsbank"
+    if savings_out and bank_out:
+        raise ValueError(
+            "은행과 저축은행을 모두 제외하면 조회할 금융권이 없습니다"
+        )
+    if savings_out or re.search(r"(^|\s)은행", q):
+        return None if bank_out else "bank"
+    return None
+
+
 @dataclass
 class Slots:
     """질문에서 규칙으로 뽑은 조건(상품 종류·금액·기간·점수·필터)과 라우팅 신호."""
@@ -82,6 +109,7 @@ class Slots:
     compare: bool = False
     calc: bool = False
     goal: bool = False
+    question: str = ""  # 검증된 독립 질문을 보존해 연속 후속 질문에서도 계산 의도를 유지한다.
 
     def to_dict(self) -> dict:
         """dict로 바꾼다(그래프 상태·세션 저장용)."""
@@ -104,26 +132,23 @@ def extract(q: str, catalog: Catalog) -> Slots:
         ),
         None,
     )
-    rate = re.search(r"(\d+(?:\.\d+)?)\s*%", q)
-    group = (
-        "savingsbank"
-        if "저축은행" in q
-        else ("bank" if re.search(r"(^|\s)은행", q) else None)
-    )
+    rate = re.search(r"(\d+(?:\.\d+)?)\s*%(?!\s*[pP])", q)
+    group = _group(q)
     metric = None
+    asked = re.sub(EXCLUDED_ITEM_RE, " ", q)
     if any(k in ("saving", "deposit") for k in kinds):
         metric = (
             "spread"
-            if re.search(SPREAD_RE, q)
+            if re.search(SPREAD_RE, asked)
             else (
                 "rate"
-                if "기본" in q
-                else ("rate_max" if re.search(r"최고|우대", q) else None)
+                if "기본" in asked
+                else ("rate_max" if re.search(r"최고|우대", asked) else None)
             )
         )
-    elif re.search(r"최고\s*금리|최대\s*금리", q):
+    elif re.search(r"최고\s*금리|최대\s*금리", asked):
         metric = "max"
-    elif re.search(r"최저\s*금리", q):
+    elif re.search(r"최저\s*금리", asked):
         metric = "min"
     f = {}
     for word, key, val in (
@@ -158,6 +183,7 @@ def extract(q: str, catalog: Catalog) -> Slots:
         cue = cue.replace(name, " ")
     distinct = {squash(p.name) for p in prods}
     return Slots(
+        question=q,
         kinds=kinds,
         group=group,
         amount_won=amounts[0] if amounts else None,
@@ -179,6 +205,8 @@ def route_rules(q: str, s: Slots) -> tuple[str | None, str]:
     """(route, 근거). 규칙으로 못 정하면 (None, ...) -> LLM 분류로 넘긴다."""
     if re.search(OUT_OF_SCOPE_RE, q):
         return "out_of_scope", "금융상품 공시 범위 밖 주제"
+    if re.search(FUTURE_RE, q):
+        return "out_of_scope", "미래 시점 금리 확정 요청"
     if not (s.kinds or s.product_ids or re.search(FINANCE_RE, q)):
         return "chat", "금융상품 관련 표현 없음"
     if s.compare:

@@ -12,6 +12,22 @@ async function listen(server, t) {
   return server.address().port;
 }
 
+test("malformed request targets return 400 without stopping the frontend", async (t) => {
+  const origin = `http://127.0.0.1:${await listen(createServer(), t)}`;
+  for (const path of ["//[", "/\\[", "//other-host/health"]) {
+    const status = await new Promise((resolve, reject) => {
+      http
+        .get(origin, { path }, (response) => {
+          response.resume();
+          resolve(response.statusCode);
+        })
+        .on("error", reject);
+    });
+    assert.equal(status, 400, path);
+    assert.equal((await fetch(origin)).status, 200);
+  }
+});
+
 test("frontend serves only public assets and returns explicit backend connection errors", async (t) => {
   const placeholder = http.createServer();
   const unavailable = await listen(placeholder, t);
@@ -124,6 +140,7 @@ test("Vite serves compiled SFCs and fixtures while keeping private files inacces
   t.after(() => vite.close());
   await vite.listen();
   const origin = `http://127.0.0.1:${vite.httpServer.address().port}`;
+  assert.equal((await fetch(origin + "//[")).status, 400);
   for (const path of [
     "/",
     "/src/main.js",

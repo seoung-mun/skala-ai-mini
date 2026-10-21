@@ -1,7 +1,6 @@
 import operator
 from typing import Annotated, TypedDict
 
-MAX_REPLAN = 1  # 구조화 조회가 0건일 때 조건 완화 횟수
 MAX_REWRITE = {"easy": 1, "hard": 2}  # 검증 실패 시 재작성 횟수
 MAX_RAG_STEPS = 3  # ReAct 검색 에이전트의 LLM 판단 상한(폭주 루프 방지)
 
@@ -21,6 +20,7 @@ class AgentState(TypedDict, total=False):
     procedure: str | None
     clarify: str | None
     replan_rounds: int
+    no_matches: bool
     answer_input: (
         dict | None
     )  # write가 LLM에 보낸 AnswerInput (validate가 같은 근거로 검증)
@@ -30,6 +30,9 @@ class AgentState(TypedDict, total=False):
     verified: bool
     insufficient: bool
     dropped_citations: list[str]
+    unverified: list[
+        str
+    ]  # 검증기가 근거와 연결하지 못한 수치·설명(반려 아님, 경고)
     writing_runs: list[dict]
     final: dict
     # 서브에이전트가 병렬로 돌려준 결과·이벤트를 리듀서로 합친다(fan-in).

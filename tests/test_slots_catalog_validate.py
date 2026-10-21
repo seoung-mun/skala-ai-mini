@@ -204,7 +204,7 @@ def test_check_answer_rejects_unsupported_number_and_fake_quote():
         "이자는 79,625원, 금리 2.45%예요 1) 2)", al, [], sec
     ) == (True, None)
     ok, why = check_answer("이자는 147,000원이에요", al, [], sec)
-    assert not ok and "147000원" in why
+    assert not ok and "147,000원" in why
     assert not check_answer(
         "0.7%p 더 줘요",
         allowed([0.7]),
@@ -274,10 +274,10 @@ def test_table_quote_rejected_with_actionable_reason():
     assert not ok and "상품 설명" in why
 
 
-def test_winner_must_be_first_mentioned():
-    """1위 질문의 답은 조회 1위를 먼저 말해야 한다."""
+def test_winner_claim_must_name_the_top_product():
+    """'가장 낮다'를 1위가 아닌 상품에 붙이면 반려하고, 공동 1위가 빠져도 반려한다."""
     w = (
-        ["국민은행", "일반신용대출"],
+        [["국민은행", "일반신용대출"]],
         ["국민은행", "일반신용대출", "케이뱅크", "신용대출"],
     )
     al = allowed([6.19, 7.12])
@@ -287,6 +287,19 @@ def test_winner_must_be_first_mentioned():
     assert check_answer(
         "국민은행 일반신용대출이 6.19%로 가장 낮아요", al, [], {}, winner=w
     )[0]
+    # 순서는 보지 않는다: 다른 상품을 먼저 나열해도 1위 주장이 맞으면 통과
+    assert check_answer(
+        "케이뱅크 신용대출 7.12%\n국민은행 일반신용대출 6.19%가 가장 낮아요",
+        al,
+        [],
+        {},
+        winner=w,
+    )[0]
+    tie = ([["국민은행"], ["케이뱅크"]], w[1])
+    ok, why = check_answer(
+        "국민은행이 6.19%로 가장 낮아요", al, [], {}, winner=tie
+    )
+    assert not ok and "케이뱅크" in why
 
 
 def test_metric_whitelist_blocks_average_rate_ranking():

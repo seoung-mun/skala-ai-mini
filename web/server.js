@@ -11,9 +11,27 @@ const files = new Map([
   ]),
 ]);
 
+function requestPath(req, res) {
+  try {
+    const url = new URL(req.url, "http://localhost");
+    if (
+      !req.url.startsWith("/") ||
+      req.url.startsWith("//") ||
+      url.origin !== "http://localhost"
+    )
+      throw new TypeError("Invalid request target");
+    return url.pathname;
+  } catch {
+    res.writeHead(400, { "Content-Type": "text/plain; charset=utf-8" });
+    res.end("잘못된 요청 경로입니다.");
+    return null;
+  }
+}
+
 function createServer(backendPort = 8100) {
   return http.createServer(async (req, res) => {
-    const pathname = new URL(req.url, "http://localhost").pathname;
+    const pathname = requestPath(req, res);
+    if (pathname === null) return;
     const apiMethod = {
       "/health": "GET",
       "/chat/stream": "GET",
@@ -109,4 +127,4 @@ if (require.main === module) {
     console.log("프론트 실행: http://127.0.0.1:8600"),
   );
 }
-module.exports = { createServer };
+module.exports = { createServer, requestPath };

@@ -6,7 +6,6 @@ AnswerOutput(ok, reply, citations)을 쓰며, 검증은 코드가 한다.
 
 from __future__ import annotations
 
-import asyncio
 import re
 import time
 
@@ -14,8 +13,23 @@ from langgraph.config import get_stream_writer
 from langgraph.types import Send
 from langsmith import traceable
 
-from ..catalog import LOAN_KINDS, METRICS, core_name, filters_for
-from ..parser import GROUP_KO, JOIN_DENY, KIND_KO, descriptions, rate_table
+from ..catalog import (
+    LOAN_KINDS,
+    METRIC_KO,
+    METRICS,
+    _option_label,
+    core_name,
+    filters_for,
+)
+from ..parser import (
+    GRADES,
+    GROUP_KO,
+    JOIN_DENY,
+    KIND_KO,
+    descriptions,
+    rate_table,
+)
+from ..provenance import check_provenance
 from ..requirements import (
     build_requirements,
     check_requirements,
@@ -29,8 +43,6 @@ from ..schemas import (
     ChatOutput,
     Description,
     LLMOutputError,
-    PlanInput,
-    PlanOutput,
     ProductDoc,
     RateRow,
     RewriteInput,
@@ -39,24 +51,37 @@ from ..schemas import (
     RouteOutput,
     Turn,
 )
-from ..slots import FINANCE_RE, Slots, asks_recall, extract, route_rules
+from ..slots import (
+    FINANCE_RE,
+    FUTURE_RE,
+    Slots,
+    asks_recall,
+    extract,
+    route_rules,
+)
 from ..validate import (
     allowed_values,
     check_answer,
     condition_rate,
     split_citations,
 )
-from .state import MAX_REPLAN, MAX_REWRITE
+from .calls import _add, _failed_usage, _llm
+from .planning import (
+    TEXT_CUE,
+    _task,
+)
+from .planning import (
+    gate_node as gate_node,
+)
+from .planning import (
+    plan_gate as plan_gate,
+)
+from .planning import (
+    plan_node as plan_node,
+)
+from .state import MAX_REWRITE
 
-TEXT_CUE = r"우대|조건|가입|대상|수수료|연체|한도|해지|유의|방법|언제|누가"
 WINNER_RE = r"제일|가장|더\s*(높|낮|좋|나)|어디|어느|뭐가|1위"
-METRIC_KO = {
-    "rate": "기본금리",
-    "rate_max": "최고금리(우대 포함)",
-    "spread": "우대 폭(최고-기본)",
-    "min": "최저금리",
-    "max": "최고금리",
-}
 
 
 def _unit(metric: str) -> str:
@@ -79,6 +104,7 @@ WRITE_SYSTEM = (
     "- 금리·금액은 근거의 숫자를 그대로 쓰고 직접 계산하거나 반올림하지 "
     "않는다. 금리에는 % 또는 %p, 금액에는 원 단위를 반드시 붙인다. "
     "계산 결과가 있으면 반드시 쓴다.\n"
+    "- 질문에 잘못된 수치가 있으면 그 수치를 반복하지 말고 확인된 공시값만 답한다.\n"
     "- 조회 결과가 질문이 묻는 값(기본금리·최고금리·우대 폭)이다. 우대 "
     "폭(%p)을 물으면 그 %p 값을 먼저 답한다.\n"
     "- 개별 우대조건 질문은 해당 조건의 우대율부터 답한다. 기본금리·전체 "
@@ -106,20 +132,6 @@ WRITE_SYSTEM = (
     "- '이전 답변이 반려된 이유'가 있으면 모두 고친다. 지정된 JSON "
     "형식으로만 답한다."
 )
-PLAN_SYSTEM = (
-    "금융상품 질문의 작업 계획자다. 질문을 읽고 필요한 조사 작업만 "
-    "고른다. 지정된 JSON 형식으로만 답한다.\n"
-    "- structured: 조건에 맞는 상품을 금리 순으로 조회한다. "
-    "비교·순위·특정 상품의 금리 수치가 필요할 때. kind 필수.\n"
-    "- calc: 이자·월 상환액·목표 금액 역산. 질문에 금액이 있을 때만. "
-    "금리를 상품에서 가져와야 하면 그 상품 kind, "
-    "질문에 금리가 주어졌으면 none.\n"
-    "- rag: 우대조건·가입 대상·수수료·유의사항 같은 설명 원문이 필요할 "
-    "때. kind는 none.\n"
-    "- kind는 '코드가 뽑은 조건'의 kinds를 우선한다. 금액·기간·점수는 "
-    "고르지 않는다(코드가 넣는다).\n"
-    "- 작업으로 나눌 수 없는 질문이면 ok=false."
-)
 REWRITE_SYSTEM = (
     "금융상품 상담 대화의 후속 질문을 독립 질문으로 다시 쓴다. 지정된 "
     "JSON 형식으로만 답한다.\n"
@@ -142,46 +154,15 @@ REFUSE_REPLY = (
     "있어요. "
     "이 범위의 상품을 물어봐 주세요."
 )
+FUTURE_REPLY = (
+    "앞으로의 금리는 공시 자료로 예측하거나 확정할 수 없어요. 금감원 공시는 "
+    "현재 기준 금리만 담고 있습니다. 지금 공시된 금리가 필요하면 상품과 "
+    "기간을 알려 주세요."
+)
 WARNING = (
     "{y}년 {m}월 공시 기준이며 실제 적용 금리는 개인 조건에 따라 다릅니다. "
     "가입·대출 권유가 아닙니다."
 )
-
-
-async def _llm(deps, system: str, payload, out, llm=None, timing=None):
-    """구조화 LLM 호출. (출력 모델, 사용량 델타)를 돌려준다. 형식 오류는 LLMOutputError로 올린다."""
-    result, u = await asyncio.to_thread(
-        (llm or deps.llm).structured, system, payload, out
-    )
-    if timing is not None:
-        timing.update(
-            {
-                k: u[k]
-                for k in (
-                    "prompt_tokens",
-                    "completion_tokens",
-                    "load_ms",
-                    "prompt_ms",
-                    "gen_ms",
-                )
-                if k in u
-            }
-        )
-    return result, {
-        "llm_calls": 1,
-        "prompt_tokens": u["prompt_tokens"],
-        "completion_tokens": u["completion_tokens"],
-        "cost_usd": u["usd"],
-    }
-
-
-def _add(*deltas: dict) -> dict:
-    """LLM 사용량 델타를 합친다(한 노드에서 LLM을 두 번 부를 때)."""
-    out: dict = {}
-    for d in deltas:
-        for k, v in d.items():
-            out[k] = out.get(k, 0) + v
-    return out
 
 
 def _numbers(text: str) -> set[str]:
@@ -204,7 +185,31 @@ async def _rewrite(q: str, state, deps) -> tuple[str, dict, dict | None]:
     ):  # 상품·종류가 있고 지시어도 없으면 독립 질문
         return q, {}, None
     i = users[-1]
-    prev_q = hist[i]["content"]
+    prev_q = prev.get("question") or hist[i]["content"]
+    period = re.fullmatch(
+        r"\s*(?:그럼|그러면|그거|같은\s*조건으로)?\s*"
+        r"(\d+\s*(?:개월|년(?:\s*\d+\s*개월)?))\s*(?:은|는|이면|으로)?\s*\??\s*",
+        q,
+    )
+    if period and prev.get("amount_won") and prev.get("term_months"):
+        updated, count = re.subn(
+            r"(?<!\d)\d+\s*(?:개월|년(?:\s*\d+\s*개월)?)",
+            lambda _: period[1],
+            prev_q,
+            count=1,
+        )
+        if count:
+            return (
+                updated,
+                {},
+                {
+                    "original": q,
+                    "question": updated,
+                    "applied": True,
+                    "follow_up": True,
+                    "reason": "사용자가 바꾼 기간만 적용하고 직전 계산 조건 유지",
+                },
+            )
     prev_a = next(
         (m["content"] for m in hist[i + 1 :] if m["role"] == "assistant"), ""
     )[:600]
@@ -220,7 +225,7 @@ async def _rewrite(q: str, state, deps) -> tuple[str, dict, dict | None]:
     except LLMOutputError as e:
         return (
             q,
-            {"llm_calls": 1},
+            _failed_usage(e),
             {
                 "original": q,
                 "question": q,
@@ -251,20 +256,6 @@ async def _rewrite(q: str, state, deps) -> tuple[str, dict, dict | None]:
             },
         )
     return out.question, delta, {**rec, "applied": True}
-
-
-def _task(
-    i: int, agent: str, desc: str, args: dict | None = None, **extra
-) -> dict:
-    """task dict(id, agent, desc, args, round)를 만든다."""
-    return {
-        "id": f"t{i}",
-        "agent": agent,
-        "desc": desc,
-        "args": args or {},
-        "round": 0,
-        **extra,
-    }
 
 
 # ---------------- route ----------------
@@ -325,6 +316,12 @@ async def route_node(state, deps) -> dict:
             else prev.get("credit_score")
         )
         s.filters = {**prev.get("filters", {}), **s.filters}
+        if prev.get("amount_won") and re.search(r"이자|상환|계산", original):
+            s.amount_won = s.amount_won or prev["amount_won"]
+            s.monthly = s.monthly or prev.get("monthly", False)
+            s.calc = True
+            if s.rate_pct is None:
+                s.rate_pct = prev.get("rate_pct")
         if any(k in ("saving", "deposit") for k in s.kinds):
             if s.metric == "max":
                 s.metric = "rate_max"
@@ -419,262 +416,11 @@ async def chat_answer_node(state, deps) -> dict:
 
 @traceable(name="refuse_node")
 async def refuse_node(state, deps) -> dict:
-    """범위 밖 질문에 고정 거절 문구로 답한다."""
-    return {"final": _final(state, deps, REFUSE_REPLY)}
-
-
-# ---------------- hard: plan / gate ----------------
-def _rule_specs(q: str, s: Slots) -> list[tuple[str, str | None]]:
-    """규칙 계획기(PLANNER=rule): 슬롯 신호로 (agent, kind) 목록을 만든다. LLM 계획기의 비교 기준이다."""
-    specs: list[tuple[str, str | None]] = [
-        ("structured", k)
-        for k in s.kinds
-        if s.compare or (s.product_ids and not s.amount_won)
-    ]
-    if s.amount_won:
-        specs.append(("calc", None))
-    if re.search(TEXT_CUE, q) or (s.product_ids and not s.compare):
-        specs.append(("rag", None))
-    return specs
-
-
-def plan_gate(
-    out: PlanOutput, s: Slots
-) -> tuple[list[tuple[str, str | None]], list[str]]:
-    """LLM 계획을 코드로 검사한다(이중 게이트의 2단계). 통과한 (agent, kind)와 뺀 이유를 돌려준다.
-    LLM은 작업 분해만 정하고, 금액·기간·점수 같은 숫자는 코드가 뽑은 슬롯에서만 가져온다."""
-    kept: list[tuple[str, str | None]] = []
-    removed: list[str] = []
-    for t in out.tasks:
-        kind = None if t.kind == "none" else t.kind
-        if t.agent == "structured" and kind is None:
-            removed.append("structured: 상품 종류 없음")
-        elif t.agent == "structured" and s.kinds and kind not in s.kinds:
-            removed.append(f"structured: 질문에 없는 종류 {kind}")
-        elif t.agent == "calc" and not s.amount_won:
-            removed.append("calc: 질문에 금액 없음")
-        elif t.agent == "calc" and any(a == "calc" for a, _ in kept):
-            removed.append("calc: 중복")
-        else:
-            spec = (t.agent, kind if t.agent != "rag" else None)
-            if spec in kept:
-                removed.append(f"{t.agent}: 중복")
-            else:
-                kept.append(spec)
-    order = {"structured": 0, "calc": 1, "rag": 2}
-    return sorted(kept, key=lambda x: order[x[0]]), removed
-
-
-async def _llm_specs(
-    q: str, s: Slots, deps
-) -> tuple[list[tuple[str, str | None]] | None, dict, str, list[str]]:
-    """LLM 계획기. 실패·거절·전부 제거되면 None을 돌려 호출자가 규칙 계획으로 바꾸고 그 사실을 이벤트에 남긴다."""
-    try:
-        slots = {
-            **s.to_dict(),
-            "product_ids": [
-                f"{deps.catalog.by_id[i].bank} {deps.catalog.by_id[i].name}"
-                for i in s.product_ids
-            ],
-        }  # 내부 id 대신 모델이 읽을 수 있는 이름
-        out, delta = await _llm(
-            deps,
-            PLAN_SYSTEM,
-            PlanInput(question=q, slots=slots),
-            PlanOutput,
-            deps.agent,
-        )
-    except LLMOutputError as e:
-        return (
-            None,
-            {"llm_calls": 1},
-            f"LLM 계획 형식 오류 → 규칙 계획 사용: {e}",
-            [],
-        )
-    if not out.ok:
-        return (
-            None,
-            delta,
-            f"LLM이 계획 불가로 판단 → 규칙 계획 사용: {out.reason}",
-            [],
-        )
-    specs, removed = plan_gate(out, s)
-    if not specs:
-        return (
-            None,
-            delta,
-            f"LLM 계획이 게이트에서 모두 제거됨 → 규칙 계획 사용: {out.reason}",
-            removed,
-        )
-    return specs, delta, out.reason, removed
-
-
-@traceable(name="plan_node")
-async def plan_node(state, deps) -> dict:
-    """hard 질문을 서브에이전트 task로 나눈다(PLANNER=llm이면 LLM 계획+게이트, 실패하면 규칙 계획)."""
-    q, s = state["query"], Slots(**state["slots"])
-    m = re.search(r"(\d+)\s*개(?!월)", q)  # '12개월'은 개수가 아니다
-    limit = int(m.group(1)) if m else 5
-
-    def query_args(kind: str) -> dict:
-        """그 종류에 적용되는 인자만 담은 query_products 인자를 만든다."""
-        # 종류에 적용되지 않는 인자는 넘기지 않는다(도구는 해당 없는 인자를 오류로 돌려준다)
-        metric = s.metric if s.metric in METRICS[kind] else None
-        args = {
-            "kind": kind,
-            "group": s.group,
-            "term_months": None if kind in LOAN_KINDS else s.term_months,
-            "metric": metric,
-            "credit_score": s.credit_score if kind == "credit" else None,
-            "filters": filters_for(kind, s.filters) or None,
-            "limit": limit,
-        }
-        ids = [i for i in s.product_ids if deps.catalog.by_id[i].kind == kind]
-        if ids:
-            args["product_ids"] = ids
-        elif s.banks:
-            args["banks"] = s.banks
-        return {k: v for k, v in args.items() if v is not None}
-
-    delta: dict = {}
-    planner, reason, removed = "rule", "슬롯 규칙", []
-    specs = None
-    if deps.planner == "llm":
-        specs, delta, reason, removed = await _llm_specs(q, s, deps)
-        if specs is not None:
-            planner = "llm"
-    if specs is None:
-        specs = _rule_specs(q, s)
-    # 명시적 조회·계산 요청은 계획자가 빠뜨려도 실행 계획에 남긴다.
-    required = [item for item in _rule_specs(q, s) if item[0] != "rag"]
-    if m and limit > 1:
-        required += [("structured", kind) for kind in s.kinds]
-    added = []
-    for agent, kind in required:
-        if not any(
-            a == agent and (agent == "calc" or k == kind) for a, k in specs
-        ):
-            specs.append((agent, kind))
-            added.append(agent)
-    if added:
-        reason += f" · 코드가 누락된 필수 작업 추가: {', '.join(added)}"
-
-    tasks: list[dict] = []
-    for agent, kind in specs:
-        if agent == "structured":
-            a = query_args(kind)
-            tasks.append(
-                _task(
-                    len(tasks) + 1,
-                    "structured",
-                    f"{KIND_KO[kind]} {METRIC_KO.get(a.get('metric', ''), '금리')} 조회",
-                    a,
-                )
-            )
-        elif agent == "calc":
-            loan = (
-                (kind in LOAN_KINDS)
-                if kind
-                else (
-                    any(k in LOAN_KINDS for k in s.kinds)
-                    or bool(re.search(r"빌리|빌려|대출|갚|상환", q))
-                )
-            )
-            monthly = s.monthly or bool(
-                re.search(r"매달|매월|월\s*얼마|한\s*달에", q)
-            )
-            ptype = (
-                "loan"
-                if loan
-                else (
-                    "saving"
-                    if (kind == "saving" or "saving" in s.kinds or monthly)
-                    else "deposit"
-                )
-            )
-            args = {
-                "product_type": ptype,
-                "amount_won": s.amount_won,
-                "term_months": s.term_months,
-                "rate_pct": s.rate_pct,
-                "mode": "goal" if s.goal else "forward",
-            }
-            if ptype == "loan" and "만기일시" in q:
-                args["repayment"] = "bullet"
-            elif ptype != "loan" and "복리" in q:
-                args["interest_type"] = "compound"
-            rate_kind = kind or next(
-                (k for k in s.kinds if (k in LOAN_KINDS) == loan), None
-            )
-            tasks.append(
-                _task(
-                    len(tasks) + 1,
-                    "calc",
-                    f"{ptype} {'역산' if s.goal else '계산'}",
-                    args,
-                    rate_query=query_args(rate_kind) if rate_kind else None,
-                )
-            )
-        else:
-            tasks.append(
-                _task(len(tasks) + 1, "rag", "우대조건·설명 원문 검색")
-            )
-    procedure = await deps.mcp.get_prompt("compare_procedure", {"question": q})
-    return {
-        **delta,
-        "tasks": tasks,
-        "procedure": procedure,
-        "replan_rounds": 0,
-        "events": [
-            {
-                "type": "PlanCreated",
-                "planner": planner,
-                "reason": reason,
-                "removed": removed,
-                "tasks": [
-                    {k: t[k] for k in ("id", "agent", "desc")} for t in tasks
-                ],
-            }
-        ],
-    }
-
-
-@traceable(name="gate_node")
-async def gate_node(state, deps) -> dict:
-    """계획을 코드로 검사한다(베이스 권위 게이트). 실행 불가능한 task는 빼고, 필요한 정보는 되묻는다."""
-    kept, clarify = [], None
-    for t in state["tasks"]:
-        a, rq = t["args"], t.get("rate_query") or {}
-        if (
-            t["agent"] == "structured"
-            and a["kind"] == "credit"
-            and a.get("credit_score") is None
-        ):
-            clarify = (
-                "신용대출 금리는 신용점수 구간마다 달라요. 신용점수(예: "
-                "750점)를 알려주시면 비교해 드릴게요."
-            )
-        elif t["agent"] == "calc" and a.get("term_months") is None:
-            clarify = "기간(예: 12개월, 30년)을 알려주시면 계산해 드릴게요."
-        elif t["agent"] == "calc" and a.get("rate_pct") is None and not rq:
-            clarify = (
-                "금리를 알려주시거나 상품을 지정해 주시면 계산해 드릴게요."
-            )
-        elif (
-            t["agent"] == "calc"
-            and a.get("rate_pct") is None
-            and rq.get("kind") == "credit"
-            and rq.get("credit_score") is None
-        ):
-            clarify = "신용점수를 알려주시면 해당 구간 금리로 계산해 드릴게요."
-        else:
-            kept.append(t)
-    if not kept and not clarify:
-        clarify = (
-            "어떤 상품(정기예금·적금·주담대·전세대출·신용대출)을 비교할지 "
-            "알려주세요."
-        )
-    return {"tasks": kept, "clarify": clarify}
+    """범위 밖 질문에 고정 거절 문구로 답한다. 미래 금리 확정 요청은 전용 안내로 답한다."""
+    reply = (
+        FUTURE_REPLY if re.search(FUTURE_RE, state["query"]) else REFUSE_REPLY
+    )
+    return {"final": _final(state, deps, reply)}
 
 
 # ---------------- 서브에이전트 분배 / 수집 ----------------
@@ -708,73 +454,29 @@ def latest(state) -> dict[str, dict]:
 
 @traceable(name="replan_check_node")
 async def replan_check_node(state, deps) -> dict:
-    """서브에이전트 결과를 모아 본다. 구조화 조회가 0건이면 조건을 한 단계 완화해 다시 보낸다(최대 MAX_REPLAN회)."""
-    if (
-        state["route"] != "hard"
-    ):  # easy 경로는 이벤트 없이 수집만 한다(계약상 ReplanCheck는 hard 전용)
+    """조회가 비어도 사용자가 명시한 조건은 보존한다."""
+    if state["route"] != "hard":
         return _rate_followup(state, deps)
-    rounds, res = state.get("replan_rounds", 0), latest(state)
-    empty = {
-        t["id"]
+    results = latest(state)
+    empty = [
+        t
         for t in state["tasks"]
         if t["agent"] == "structured"
-        and res[t["id"]]["ok"]
-        and not res[t["id"]]["rows"]
-    }
-    if not empty or rounds >= MAX_REPLAN:
-        why = (
-            "조회 결과 있음" if not empty else f"완화 상한({MAX_REPLAN}회) 도달"
-        )
-        return {
-            "events": [
-                {
-                    "type": "ReplanCheck",
-                    "round": rounds,
-                    "is_sufficient": True,
-                    "reason": why,
-                }
-            ]
-        }
-    tasks, dropped = [dict(t) for t in state["tasks"]], []
-    for t in tasks:
-        key = (
-            next(
-                (
-                    k
-                    for k in ("filters", "term_months", "group")
-                    if k in t["args"]
-                ),
-                None,
-            )
-            if t["id"] in empty
-            else None
-        )
-        if key:
-            t["args"] = {k: v for k, v in t["args"].items() if k != key}
-            t["round"] = rounds + 1
-            dropped.append(key)
-    if not dropped:
-        return {
-            "events": [
-                {
-                    "type": "ReplanCheck",
-                    "round": rounds,
-                    "is_sufficient": True,
-                    "reason": "더 완화할 조건 없음",
-                }
-            ]
-        }
+        and results[t["id"]]["ok"]
+        and not results[t["id"]]["rows"]
+    ]
     return {
-        "tasks": tasks,
-        "replan_rounds": rounds + 1,
         "events": [
             {
                 "type": "ReplanCheck",
-                "round": rounds,
-                "is_sufficient": False,
-                "reason": f"조회 0건 → 조건 완화: {', '.join(dropped)} 제거",
+                "round": 0,
+                "is_sufficient": not empty,
+                "reason": "지정한 조건의 조회 결과가 없습니다. 조건을 유지합니다."
+                if empty
+                else "조사 완료",
             }
         ],
+        "no_matches": bool(empty),
     }
 
 
@@ -850,6 +552,31 @@ def product_doc(deps, pid: str) -> ProductDoc:
     """상품을 답변 LLM용 ProductDoc(기본 정보·금리표·설명)으로 만든다."""
     p = deps.catalog.by_id[pid]
     end = p.base["dcls_end_day"]
+    rates = []
+    for option in p.options:
+        values = (
+            [
+                ("대출금리", option["grades"].get(grade), grade)
+                for grade, _ in GRADES
+            ]
+            if p.kind == "credit" and option["type"] == "A"
+            else [
+                (metric, option.get(metric), None) for metric in METRICS[p.kind]
+            ]
+        )
+        for metric, value, grade in values:
+            if value is not None:
+                rates.append(
+                    RateRow(
+                        product_id=p.id,
+                        bank=p.bank,
+                        product=p.name,
+                        option=_option_label(p.kind, option, grade),
+                        metric=METRIC_KO.get(metric, metric),
+                        value=value,
+                        unit=_unit(metric),
+                    )
+                )
     return ProductDoc(
         product_id=p.id,
         title=f"{p.bank} {p.name} ({KIND_KO[p.kind]})",
@@ -862,6 +589,7 @@ def product_doc(deps, pid: str) -> ProductDoc:
             "판매 상태": "판매중" if not end else f"공시 종료일 {end}",
         },
         rate_table=rate_table(p),
+        rates=rates,
         data_flags=p.flags,
         descriptions=[
             Description(section=s, text=t) for s, t in descriptions(p)
@@ -926,7 +654,7 @@ async def write_node(state, deps) -> dict:
         )
         draft = out.model_dump()
     except LLMOutputError as e:  # 숨기지 않고 검증 실패로 기록한다
-        draft, u = {"_error": str(e)}, {"llm_calls": 1}
+        draft, u = {"_error": str(e)}, _failed_usage(e)
     timing["writing_ms"] = int((time.perf_counter() - started) * 1000)
     writer(
         {
@@ -952,7 +680,7 @@ async def validate_node(state, deps) -> dict:
         state.get("attempts", 0) + 1,
         AnswerInput(**state["answer_input"]),
     )
-    insufficient, dropped = False, []
+    insufficient, dropped, notes = False, [], []
     if d.get("_error"):
         ok, why = False, d["_error"]
     elif not d["ok"]:
@@ -1010,8 +738,12 @@ async def validate_node(state, deps) -> dict:
             )
             if not inp.calculations
             else None,
+            question=state["query"],
         )
-        missing = check_requirements(inp, d["reply"])
+        # 확인된 오류만 반려한다. 검사기가 해석하지 못한 수치·의역은 notes(경고)로만 남긴다.
+        missing = check_requirements(inp, d["reply"], notes) + check_provenance(
+            inp, d["reply"], notes
+        )
         if missing:
             ok, why = False, "\n".join(([why] if why else []) + missing)
     return {
@@ -1021,6 +753,7 @@ async def validate_node(state, deps) -> dict:
         "insufficient": insufficient,
         "draft": d,
         "dropped_citations": dropped,
+        "unverified": list(dict.fromkeys(notes)),
         "events": [
             {
                 "type": "Validation",
@@ -1028,6 +761,7 @@ async def validate_node(state, deps) -> dict:
                 "verdict": "pass" if ok else "fail",
                 "reason": why,
             }
+            | ({"unverified": list(dict.fromkeys(notes))} if notes else {})
         ],
     }
 
@@ -1047,8 +781,8 @@ def _attribute(
 
 def _winner(
     query: str, rows: list[RateRow], catalog
-) -> tuple[list[str], list[str]] | None:
-    """1위를 묻는 질문이면 (1위 이름들, 전체 후보 이름들)을 돌려준다. 아니면 None."""
+) -> tuple[list[list[str]], list[str]] | None:
+    """1위를 묻는 질문이면 (1위 상품별 이름 후보들, 전체 후보 이름들)을 돌려준다. 아니면 None."""
     if not rows or not re.search(WINNER_RE, query):
         return None
 
@@ -1065,7 +799,8 @@ def _winner(
             + (r.bank.replace("주식회사", "").strip(),)
         ]
 
-    return names([r for r in rows if r.value == rows[0].value]), names(rows)
+    tops = [r for r in rows if r.value == rows[0].value]
+    return [names([r]) for r in tops], names(rows)
 
 
 def _card(deps, pid: str, highlight: dict | None = None) -> dict:
@@ -1138,17 +873,46 @@ async def finalize_node(state, deps) -> dict:
     route = state["route"]
     rows, calcs, doc_ids, failed = collected(state)
     extra = [f"{d}에 실패해 이 부분은 답에서 빠졌어요." for d in failed]
+    clarify = list(
+        dict.fromkeys(
+            r["clarify"] for r in latest(state).values() if r.get("clarify")
+        )
+    )
+    extra += clarify
+    if state.get("no_matches") and not rows and not calcs:
+        return {
+            "final": _final(
+                state,
+                deps,
+                "지정하신 조건에 맞는 공시 상품을 찾지 못했어요. 기간·금융권·상품 조건을 바꾸지 않고 조회한 결과입니다.",
+                extra=extra,
+            )
+        }
+    if clarify and not rows and not calcs:
+        return {"final": _final(state, deps, "\n".join(clarify), extra=extra)}
+    if state.get("no_matches"):
+        extra.append(
+            "일부 조회는 지정한 조건에 맞는 상품이 없습니다. 요청 조건은 변경하지 않았어요."
+        )
     if state.get("clarify"):
         extra.append(state["clarify"])
     cites = []
     if state.get("verified"):
         reply, cites = state["draft"]["reply"], state["draft"]["citations"]
+        if state.get("unverified"):
+            extra.append(
+                f"검증기가 근거와 연결하지 못한 수치·설명 {len(state['unverified'])}건이 있어요. "
+                "해당 부분은 공시 원문으로 확인해 주세요."
+            )
         if state.get("dropped_citations"):
             extra.append(
                 f"원문과 일치하지 않는 인용 {len(state['dropped_citations'])}건은 제외했어요."
             )
     elif state.get("insufficient"):
-        reply = f"공시 자료만으로는 답하기 어려워요. {state['draft'].get('missing') or ''}".strip()
+        missing = (state["draft"].get("missing") or "").strip().rstrip(".")
+        reply = "공시 자료만으로는 답하기 어려워요." + (
+            f" 확인하지 못한 내용: {missing}." if missing else ""
+        )
     elif route == "hard" or rows:
         reply = _table_reply(rows, calcs)
         inp = AnswerInput(**state["answer_input"])
@@ -1209,7 +973,19 @@ def after_gate(state):
 
 def after_replan(state):
     """replan_check 다음 분기: 결과 없는 task가 있으면 다시 보내고, 없으면 write."""
-    return dispatch(state) if pending(state) else "write"
+    if pending(state):
+        return dispatch(state)
+    rows, calcs, _, _ = collected(state)
+    if (
+        not rows
+        and not calcs
+        and (
+            state.get("no_matches")
+            or any(r.get("clarify") for r in latest(state).values())
+        )
+    ):
+        return "finalize"
+    return "write"
 
 
 def after_validate(state) -> str:

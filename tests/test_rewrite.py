@@ -79,7 +79,7 @@ def test_rewrite_with_numbers_from_the_previous_answer_is_rejected():
     """직전 답의 숫자가 들어간 재작성은 버리고 원문을 쓴다."""
     llm = FakeLLM(
         rw("금리 3.2% 상품 24개월은?"),
-        ans("가은행 가나적금 24개월 기본금리는 2.45%예요"),
+        {"ok": False, "reply": "", "citations": [], "missing": "24개월 금리 없음"},
     )
     _, st = run("그거 24개월은?", llm)
     rec = st["events"][0]["rewrite"]
@@ -96,12 +96,12 @@ def test_rewrite_with_numbers_from_the_previous_answer_is_rejected():
 
 def test_no_history_or_standalone_question_skips_rewrite():
     """독립 질문은 재작성 LLM을 부르지 않는다."""
-    llm = FakeLLM(ans("가은행 가나적금 우대는 연 0.5%p예요"))
+    llm = FakeLLM(ans("가은행 가나적금 급여 이체 우대는 연 0.5%p예요"))
     _, st = run(
         "가나적금 우대조건 알려줘", llm
     )  # 상품명이 있고 지시어가 없으면 독립 질문
     assert "rewrite" not in st["events"][0] and len(llm.inputs) == 1
-    llm = FakeLLM(ans("가은행 가나적금 우대는 연 0.5%p예요"))
+    llm = FakeLLM(ans("가은행 가나적금 급여 이체 우대는 연 0.5%p예요"))
     _, st = run("그거 우대조건은?", llm, history=[])
     assert "rewrite" not in st["events"][0]
 

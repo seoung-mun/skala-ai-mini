@@ -4,7 +4,7 @@ import re
 
 from .catalog import squash
 from .schemas import RequiredFact
-from .validate import values_of
+from .validate import condition_rate, values_of
 
 DETAIL_FIELDS = (
     (r"가입\s*대상|가입\s*자격", "가입 대상"),
@@ -70,8 +70,22 @@ def build_requirements(inp) -> list[RequiredFact]:
     return facts
 
 
-def check_membership_claims(inp, reply: str) -> list[str]:
-    """가입 관련 주장은 상품별 공시 원문과 제한된 연결 문구만 허용한다."""
+GENERALIZED_RE = (
+    r"누구나|아무나|조건없이|제한없이"
+    r"|(?:성별|나이|연령).{0,12}(?:무관|관계없)"
+)
+# '남성도 가입할 수 있습니다'처럼 공시 가입 대상 밖으로 넓히는 주장
+WIDENED_RE = (
+    r"(?:남성|여성|개인사업자|법인|외국인|미성년자?|청소년)\S{0,3}도"
+    r".{0,8}(?:가입|이용|대상|허용|가능)"
+)
+
+
+def check_membership_claims(
+    inp, reply: str, notes: list | None = None
+) -> list[str]:
+    """가입 정보에서 확인된 오류(공시 원문 부정, 공시된 가입 제한을 없애는 일반화)만 돌려준다.
+    원문과 다른 표현(의역)은 검사기가 같은 뜻인지 판정하지 못하므로 notes에 남긴다."""
     if not inp.documents:
         return []
     fields = {
@@ -115,6 +129,17 @@ def check_membership_claims(inp, reply: str) -> list[str]:
         if re.search(r"두상품|모든상품|둘다|세상품|두예금|둘모두", part):
             pids = set(docs)
         allowed = set.intersection(*(sources[pid] for pid in pids))
+        borrowed = {
+            v
+            for pid in docs
+            if pid not in pids
+            for _, v in sources[pid]
+            if len(v) >= 4
+        } - {v for _, v in allowed}
+        if any(v in part for v in borrowed):
+            return [
+                "다른 상품의 가입 정보를 이 상품에 썼습니다. 상품별 공시 가입 정보를 그대로 쓰세요."
+            ]
         for index, value in enumerate(
             sorted({v for _, v in allowed}, key=lambda v: (-len(v), v))
         ):
@@ -154,20 +179,31 @@ def check_membership_claims(inp, reply: str) -> list[str]:
                     "",
                     part,
                 )
-        if re.search(
-            r"가입(?:대상|자격|제한|가능|불가|할수|이가능|이불가)|누구나|아무나|조건없이|제한없이"
-            r"|(?:성별|나이|연령).{0,12}(?:무관|관계없)"
-            r"|(?:남성|여성|개인사업자|법인|모두).{0,8}(?:대상|허용|포함|가능)",
-            part,
+        restricted = any(
+            docs[pid].info.get("가입 제한") not in (None, "", "제한없음")
+            for pid in pids
+        )
+        if (
+            re.search(GENERALIZED_RE, part)
+            or re.search(WIDENED_RE, part)
+            or (restricted and re.search(r"가입제한이?없", part))
         ):
             return [
-                "공시 원문으로 확인되지 않은 가입대상·자격·제한 주장이 있습니다. 추가 추측을 빼고 상품별 원문만 쓰세요."
+                "공시된 가입 대상·제한을 넓히거나 없애는 주장(누구나, 제한 없이, ○○도 가입 가능 등)이 있습니다. "
+                "상품별 공시 가입 정보를 그대로 쓰세요."
             ]
+        if notes is not None and re.search(
+            r"가입(?:대상|자격|제한|가능|불가|할수|이가능|이불가)", part
+        ):
+            notes.append(
+                "공시 원문과 다르게 쓴 가입 정보(의역)는 검증하지 못함"
+            )
     return []
 
 
-def check_requirements(inp, reply: str) -> list[str]:
-    """요구 항목을 상품별 본문에 연결해 검사한다. 자유로운 의미 평가를 대신하지 않는다."""
+def check_requirements(inp, reply: str, notes: list | None = None) -> list[str]:
+    """요구 항목(핵심 결과)이 빠졌거나 근거와 다르면 오류로 돌려준다. 자유로운 의미 평가를 대신하지 않는다.
+    가입 정보처럼 원문을 의역한 항목은 같은 뜻인지 판정할 수 없어 notes에만 남긴다."""
     text = squash(reply.replace("**", "").replace("`", ""))
     names = {squash(f.product) for f in inp.required_facts if f.product}
     positions = sorted(
@@ -177,26 +213,48 @@ def check_requirements(inp, reply: str) -> list[str]:
     for i, (start, name) in enumerate(positions):
         end = positions[i + 1][0] if i + 1 < len(positions) else len(text)
         blocks[name] = text[start:end]
-    errors = check_membership_claims(inp, reply)
+    errors = check_membership_claims(inp, reply, notes)
     for fact in inp.required_facts:
         block = blocks.get(squash(fact.product), "") if fact.product else text
         label = f"{fact.product} {fact.section}".strip()
         if fact.kind == "rate":
             present = float(fact.value) in values_of(block, "pct")
         elif fact.kind == "text":
-            # shortcut: 가입 정보는 원문 일치로 검사한다. 의역 지원은 별도 의미 평가를 검증한 뒤 추가한다.
             present = bool(block) and (
                 squash(fact.value) in block
                 if fact.value
                 else squash(fact.section) in block
                 and bool(re.search(r"확인불가|정보없|공시되지", block))
             )
+            others = {
+                squash(f.value)
+                for f in inp.required_facts
+                if f.kind == "text"
+                and f.section == fact.section
+                and f.product != fact.product
+                and f.value
+            }
+            borrowed = any(v in block for v in others - {squash(fact.value)})
+            # 항목은 다뤘지만 원문과 표현이 다르면(의역) 누락이 아니라 '검증 못 함'이다.
+            if (
+                not present
+                and not borrowed
+                and fact.value
+                and squash(fact.section) in block
+            ):
+                if notes is not None:
+                    notes.append(
+                        f"{label}: 원문과 다른 표현이라 같은 뜻인지 검증하지 못함"
+                    )
+                present = True
         else:
             cue = fact.section[:2]
             other = "세후" if cue == "세전" else "세전"
-            part = re.search(cue + rf"((?:(?!{other}).){{0,60}})", text)
-            present = bool(part) and float(fact.value) in values_of(
-                part[1], "won"
+            present = any(
+                float(fact.value) in values_of(part[1], "won")
+                for part in re.finditer(
+                    cue + rf"(?=((?:(?!{other}).){{0,60}}))", text
+                )
             )
         if not present:
             errors.append(
@@ -207,7 +265,12 @@ def check_requirements(inp, reply: str) -> list[str]:
                     else " (확인 불가 명시 필요)"
                 )
             )
-    if inp.rows and not inp.calculations and not inp.required_facts:
+    if (
+        inp.rows
+        and not inp.calculations
+        and not inp.required_facts
+        and not condition_rate(inp.question, inp.documents)
+    ):
         if not (
             {round(r.value, 2) for r in inp.rows} & values_of(reply, "pct")
         ):

@@ -47,7 +47,9 @@ def build_graph(deps):
     g.add_edge("refuse", END)
     g.add_edge("plan", "gate")
     g.add_conditional_edges("gate", N.after_gate, [*agents, "finalize"])
-    g.add_conditional_edges("replan_check", N.after_replan, [*agents, "write"])
+    g.add_conditional_edges(
+        "replan_check", N.after_replan, [*agents, "write", "finalize"]
+    )
     g.add_edge("write", "validate")
     g.add_conditional_edges("validate", N.after_validate, ["write", "finalize"])
     g.add_edge("finalize", END)

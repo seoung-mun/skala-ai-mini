@@ -12,7 +12,8 @@ export default defineConfig({
         // Use the same API proxy and contract fixtures in development and production.
         const handleRequest = frontend.createServer().listeners("request")[0];
         server.middlewares.use((req, res, next) => {
-          const path = new URL(req.url, "http://localhost").pathname;
+          const path = frontend.requestPath(req, res);
+          if (path === null) return;
           if (
             ["/health", "/chat", "/chat/stream", "/sessions/reset"].includes(
               path,

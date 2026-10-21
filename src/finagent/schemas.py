@@ -19,6 +19,10 @@ Route = Literal["chat", "out_of_scope", "easy", "hard"]
 class LLMOutputError(RuntimeError):
     """LLM 응답이 지정한 스키마를 따르지 않음."""
 
+    def __init__(self, message: str, *, usage: dict | None = None):
+        super().__init__(message)
+        self.usage = usage
+
 
 class StrictOutput(BaseModel):
     """LLM 출력 모델의 기반. 정의되지 않은 키를 스키마에서 금지한다(additionalProperties=false).
@@ -221,6 +225,9 @@ class ProductDoc(BaseModel):
     )
     rate_table: str = Field(
         description="금리표(마크다운). 숫자는 써도 되지만 인용(citation)하지 않는다"
+    )
+    rates: list[RateRow] = Field(
+        default=[], description="상품 옵션별 검증 근거. 공시 평균금리는 제외한다"
     )
     descriptions: list[Description] = []
     data_flags: list[str] = Field(

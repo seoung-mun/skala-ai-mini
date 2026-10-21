@@ -1,6 +1,7 @@
 const { test, before } = require("node:test");
 const assert = require("node:assert/strict");
 const { createRenderer, ref, watchEffect, nextTick } = require("vue");
+globalThis.window = new EventTarget();
 
 let useSessions, useChatStream, useServiceStatus;
 before(async () => {
@@ -43,14 +44,20 @@ function storage(t, value = "[]") {
     "localStorage",
   );
   const writes = [];
+  const values = new Map([["finagent_sessions_v1", value]]);
   Object.defineProperty(globalThis, "localStorage", {
     configurable: true,
     value: {
-      getItem: () => value,
+      get length() {
+        return values.size;
+      },
+      key: (index) => [...values.keys()][index] ?? null,
+      getItem: (key) => values.get(key) ?? null,
       setItem: (key, text) => {
         writes.push({ key, text });
-        value = text;
+        values.set(key, text);
       },
+      removeItem: (key) => values.delete(key),
     },
   });
   t.after(() => {
@@ -58,6 +65,16 @@ function storage(t, value = "[]") {
       Object.defineProperty(globalThis, "localStorage", descriptor);
     else delete globalThis.localStorage;
   });
+  writes.records = () =>
+    [...values]
+      .filter(([key]) => key.startsWith("finagent_session_v2:"))
+      .map(([, raw]) => JSON.parse(raw));
+  writes.notify = (id) => {
+    const event = new Event("storage");
+    event.key = "finagent_session_v2:" + id;
+    event.storageArea = localStorage;
+    window.dispatchEvent(event);
+  };
   return writes;
 }
 
@@ -77,7 +94,7 @@ test("session recovery keeps the original corrupt storage and reports the proble
   assert.equal(writes.length, 0);
 });
 
-test("restored pending answers become interrupted; stream locks protect session changes", (t) => {
+test("restored pending answers become interrupted; stream locks protect session changes", async (t) => {
   storage(
     t,
     JSON.stringify([
@@ -101,16 +118,16 @@ test("restored pending answers become interrupted; stream locks protect session 
   assert.equal(state.session.value.messages[1].error.code, "INTERRUPTED");
   streaming.value = true;
   state.newSession();
-  state.deleteSession("old");
+  await state.deleteSession("old");
   state.selectSession("other");
   assert.equal(state.sessions.value.length, 2);
   assert.equal(state.currentId.value, "old");
   streaming.value = false;
   const id = freshId;
   state.selectSession("old");
-  state.deleteSession("old");
+  await state.deleteSession("old");
   assert.equal(state.currentId.value, id);
-  state.deleteSession(id);
+  await state.deleteSession(id);
   assert.equal(state.sessions.value.length, 1);
   assert.notEqual(state.currentId.value, id);
 });
@@ -309,7 +326,7 @@ test("every page entry starts a fresh session and preserves existing conversatio
     second.sessions.value.find((s) => s.id === "saved"),
     previous,
   );
-  const persisted = JSON.parse(writes.at(-1).text);
+  const persisted = writes.records();
   assert.equal(persisted.length, 1);
   assert.notEqual(persisted[0].id, second.currentId.value);
   assert.ok(persisted.some((s) => s.id === "saved"));
@@ -334,14 +351,14 @@ test("empty drafts are absent from history and storage across refreshes and new-
     for (let n = 0; n < 3; n++) state.newSession();
     assert.equal(state.sessions.value.length, 2);
     assert.equal(state.groups.value.flatMap((g) => g.items).length, 1);
-    assert.deepEqual(JSON.parse(writes.at(-1).text), [saved]);
+    assert.deepEqual(writes.records(), [saved]);
   }
 });
 
 test("a first question enters history immediately even when the request fails", async (t) => {
   const writes = storage(t);
   t.mock.method(globalThis, "fetch", async () => {
-    const stored = JSON.parse(writes.at(-1).text);
+    const stored = writes.records();
     assert.equal(stored.length, 1);
     assert.equal(stored[0].messages[0].content, "첫 질문");
     throw new Error("연결 실패");
@@ -354,7 +371,7 @@ test("a first question enters history immediately even when the request fails", 
       ...useChatStream(sessions.session, sessions.save, streaming, null),
     };
   });
-  assert.deepEqual(JSON.parse(writes.at(-1).text), []);
+  assert.deepEqual(writes.records(), []);
   await state.send("   ");
   assert.equal(state.history.value.length, 0);
   await state.send("첫 질문");
@@ -365,7 +382,7 @@ test("a first question enters history immediately even when the request fails", 
   );
   state.newSession();
   assert.equal(state.history.value.length, 1);
-  assert.equal(JSON.parse(writes.at(-1).text).length, 1);
+  assert.equal(writes.records().length, 1);
 });
 
 function confirmReset(t, result = true) {
@@ -393,6 +410,7 @@ test("clear waits for server acknowledgement, resets its context and rotates the
   state.save();
   const id = state.currentId.value;
   const pending = state.clearChat();
+  await new Promise(setImmediate);
   assert.equal(streaming.value, true);
   assert.equal(state.session.value.messages.length, 1);
   state.newSession();
@@ -406,7 +424,7 @@ test("clear waits for server acknowledgement, resets its context and rotates the
   assert.notEqual(state.currentId.value, id);
   assert.deepEqual(state.session.value.messages, []);
   assert.equal(state.history.value.length, 0);
-  assert.deepEqual(JSON.parse(writes.at(-1).text), []);
+  assert.deepEqual(writes.records(), []);
 });
 
 test("failed reset preserves the conversation and cancellation makes no request", async (t) => {
@@ -446,4 +464,150 @@ test("preview reset remains usable without a backend", async (t) => {
   assert.notEqual(state.currentId.value, id);
   assert.deepEqual(state.session.value.messages, []);
   assert.equal(state.storageError.value, "");
+});
+
+test("two tabs keep separate conversations and synchronize updates and deletion", async (t) => {
+  const store = storage(t);
+  const first = mount(t, () => useSessions(ref(false))).state;
+  const second = mount(t, () => useSessions(ref(false))).state;
+  const firstId = first.currentId.value,
+    secondId = second.currentId.value;
+  for (const [tab, question] of [
+    [first, "A 질문"],
+    [second, "B 질문"],
+  ]) {
+    await tab.editSession(() => {
+      tab.session.value.messages.push({ role: "user", content: question });
+      tab.save();
+    });
+  }
+  assert.equal(store.records().length, 2);
+  store.notify(firstId);
+  store.notify(secondId);
+  assert.equal(first.history.value.length, 2);
+  assert.equal(second.history.value.length, 2);
+  await first.editSession(() => {
+    first.session.value.messages.push({ role: "user", content: "A 후속 질문" });
+    first.save();
+  });
+  store.notify(firstId);
+  second.selectSession(firstId);
+  assert.equal(second.session.value.messages.at(-1).content, "A 후속 질문");
+  await first.deleteSession(firstId);
+  store.notify(firstId);
+  assert.equal(second.currentId.value, secondId);
+  assert.deepEqual(
+    store.records().map((item) => item.id),
+    [secondId],
+  );
+  const reloaded = mount(t, () => useSessions(ref(false))).state;
+  assert.deepEqual(
+    reloaded.history.value.map((item) => item.id),
+    [secondId],
+  );
+});
+
+test("migration preserves existing newer records and removed legacy sessions stay removed", async (t) => {
+  const old = { id: "old", messages: [{ role: "user", content: "이전 질문" }] };
+  const store = storage(t, JSON.stringify([old]));
+  localStorage.setItem(
+    "finagent_session_v2:old",
+    JSON.stringify({ ...old, title: "새 제목" }),
+  );
+  const state = mount(t, () => useSessions(ref(false))).state;
+  assert.equal(state.history.value[0].title, "새 제목");
+  assert.equal(localStorage.getItem("finagent_sessions_v1"), null);
+  await state.deleteSession("old");
+  const next = mount(t, () => useSessions(ref(false))).state;
+  assert.equal(next.history.value.length, 0);
+  assert.deepEqual(store.records(), []);
+});
+
+test("failed migration and corrupt data retain their original recoverable storage", (t) => {
+  const original = JSON.stringify([
+    { id: "old", messages: [{ role: "user", content: "보존 질문" }] },
+  ]);
+  storage(t, original);
+  t.mock.method(localStorage, "setItem", () => {
+    throw new Error("quota exceeded");
+  });
+  const state = mount(t, () => useSessions(ref(false))).state;
+  assert.equal(localStorage.getItem("finagent_sessions_v1"), original);
+  assert.match(state.storageError.value, /원본 저장 기록을 보존/);
+});
+
+test("a conversation lock prevents another tab from sending or deleting during an active answer", async (t) => {
+  const store = storage(t);
+  let finish,
+    calls = 0;
+  t.mock.method(globalThis, "fetch", () => {
+    calls++;
+    return new Promise((resolve) => {
+      finish = () =>
+        resolve(response([{ type: "FinalAnswer", reply: "완료" }]));
+    });
+  });
+  const setup = () => {
+    const streaming = ref(false);
+    const sessions = useSessions(streaming);
+    return {
+      ...sessions,
+      ...useChatStream(
+        sessions.session,
+        sessions.save,
+        streaming,
+        null,
+        sessions.editSession,
+      ),
+    };
+  };
+  const first = mount(t, setup).state;
+  const id = first.currentId.value;
+  const pending = first.send("첫 질문");
+  await new Promise(setImmediate);
+  const second = mount(t, setup).state;
+  second.selectSession(id);
+  assert.equal(store.records()[0].messages.at(-1).pending, true);
+  await second.send("충돌 질문");
+  await second.deleteSession(id);
+  assert.equal(calls, 1);
+  assert.match(second.storageError.value, /다른 탭/);
+  assert.equal(store.records().length, 1);
+  finish();
+  await pending;
+  const followup = second.send("후속 질문");
+  await new Promise(setImmediate);
+  assert.equal(calls, 2);
+  assert.equal(second.session.value.messages.length, 4);
+  assert.equal(second.session.value.messages[1].finalAnswer.reply, "완료");
+  finish();
+  await followup;
+  assert.equal(store.records()[0].messages.length, 4);
+});
+
+test("a failed save cannot be overwritten by a refresh from another tab", async (t) => {
+  const store = storage(t);
+  const state = mount(t, () => useSessions(ref(false))).state;
+  const id = state.currentId.value;
+  state.session.value.messages.push({ role: "user", content: "저장된 질문" });
+  state.save();
+  t.mock.method(localStorage, "setItem", () => {
+    throw new Error("quota exceeded");
+  });
+  state.session.value.messages.push({
+    role: "user",
+    content: "아직 저장 안 된 질문",
+  });
+  state.save();
+  store.notify(id);
+  let edited = false;
+  await state.editSession(() => {
+    edited = true;
+  });
+  assert.equal(edited, false);
+  assert.equal(
+    state.session.value.messages.at(-1).content,
+    "아직 저장 안 된 질문",
+  );
+  assert.match(state.storageError.value, /내보낸 뒤 새로고침/);
 });

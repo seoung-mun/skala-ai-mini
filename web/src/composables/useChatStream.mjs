@@ -1,10 +1,17 @@
 import { ref, onUnmounted } from "vue";
 import { formatTime, consumeSseStream } from "../client.mjs";
 
-export function useChatStream(session, save, streaming, preview) {
+export function useChatStream(
+  session,
+  save,
+  streaming,
+  preview,
+  editSession = (action) => action(),
+) {
   const input = ref("");
   let controller;
-  async function send(text = input.value) {
+  const send = (text = input.value) => editSession(() => sendCurrent(text));
+  async function sendCurrent(text) {
     const question = text.trim();
     if (!question || streaming.value) return;
     if (question.length > 500) {
