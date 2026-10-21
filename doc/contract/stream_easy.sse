@@ -1,6 +1,10 @@
 data: {"type": "RouteDecided", "route": "easy", "reason": "단일 상품 사실 조회"}
 
-data: {"type": "TaskCompleted", "id": "t1", "agent": "rag", "ok": true, "retries": 0, "elapsed_ms": 41}
+data: {"type": "TaskCompleted", "id": "t1", "agent": "rag", "ok": true, "retries": 0, "elapsed_ms": 41, "error": null}
+
+data: {"type": "AnswerProgress", "stage": "writing", "attempt": 1}
+
+data: {"type": "AnswerProgress", "stage": "validating", "attempt": 1, "writing_ms": 4200}
 
 data: {"type": "Validation", "attempt": 1, "verdict": "pass", "reason": null}
 

@@ -1,8 +1,46 @@
+# Credentials and local configuration
 .env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# Dependencies, builds, caches and local runtime state
 .venv/
+node_modules/
+dist/
+build/
+*.egg-info/
 __pycache__/
+*.py[cod]
 .pytest_cache/
-data/raw/
-data/emb_cache/
+.ruff_cache/
+.coverage*
+htmlcov/
+coverage/
+*.log
+.DS_Store
 session.db
-eval/results/*_pilot*
+session.db-*
+
+# Rebuild Markdown from the committed public data/raw snapshot
+data/md/
+data/emb_cache/
+
+# Local experiments and generated learning material
+eval/results/
+eval/*.md
+!eval/BASELINE_PROTOCOL_20261021.md
+graphify-out/
+.archify/
+
+# Keep only the API contract and executable preview fixtures
+doc/*
+!doc/API_CONTRACT.md
+!doc/contract/
+
+# Local editor and coding-agent instructions
+.vscode/
+.idea/
+AGENTS.md
+CLAUDE.md

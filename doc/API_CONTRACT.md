@@ -1,6 +1,6 @@
 # API 계약 (백엔드 ↔ 프론트)
 
-- 버전: **0.3.0** (2026-10-20)
+- 버전: **0.8.0** (2026-10-21)
 - 백엔드 `127.0.0.1:8100`, 프론트는 8600에서 같은 경로로 프록시한다.
 - 예시 스트림: `doc/contract/stream_easy.sse`, `stream_hard.sse`, `stream_error.sse`, `stream_v1.sse`
 
@@ -8,8 +8,13 @@
 
 | 버전 | 날짜 | 변경 |
 |---|---|---|
+| 0.8.0 | 2026-10-21 | `POST /sessions/reset`로 해당 대화의 서버 이력·슬롯 초기화. 같은 대화 요청과 초기화는 직렬 처리. 화면은 성공 후 새 ID로 전환하고 실패 시 기존 대화를 보존. 가입정보의 근거 없는 추가 주장·원문 부정 반려 및 비교 대상 밖 검색 후보 제외 |
+| 0.7.0 | 2026-10-21 | `metadata.writing_runs`에 작성 회차별 입력·출력 토큰 및 제공 가능한 모델 로딩·입력 처리·생성 시간(ms) 추가. 명시적 가입정보 인용은 원문에서 코드로 구성. 대화는 본문·카드, 분석·출처는 별도 화면 |
+| 0.6.0 | 2026-10-21 | `RouteDecided.intent` 추가(`recall`, `finance_followup`, `finance_new`, `chat`, `out_of_scope`). 검증 범위에 명시적 요청 항목의 누락 검사 추가. 회상은 상품 카드 없이 대화 기록에서 응답 |
+| 0.5.0 | 2026-10-21 | `AnswerProgress` 추가: 작성 시작·검증 시작과 해당 회차 작성 소요 시간 알림 (하위 호환). 검증 전 답변 본문은 보내지 않음 |
 | 0.1.0 | 2026-10-20 | 최초 작성 |
 | 0.2.0 | 2026-10-20 | Calculation에 `after_tax`(세후 이자, 선택) 추가, `inputs` 키를 calculate 도구 기준으로 변경, metadata에 토큰 수 추가 (하위 호환) |
+| 0.4.0 | 2026-10-21 | `PlanCreated`에 `planner`(`llm` \| `rule`), `reason`(문자열), `removed`(코드 게이트가 뺀 작업 이유 목록) 추가 (하위 호환) |
 | 0.3.0 | 2026-10-20 | (v3) `highlight.unit`에 `"%p"`(우대 폭) 추가, Calculation `inputs.mode`(`forward` \| `goal`) 추가 — goal이면 `result`가 필요 월 납입액·필요 원금·최대 대출 원금 (하위 호환) |
 
 ## 1. 엔드포인트
@@ -18,6 +23,13 @@
 ```json
 {"status": "ok", "version": "v2", "llm": "ollama:qwen3:8b", "data_month": "202609"}
 ```
+
+### `POST /sessions/reset`
+요청: `{"thread_id":"t-1"}`. 성공: `{"ok":true,"thread_id":"t-1"}`.
+해당 대화의 서버 이력과 슬롯을 삭제하며, 없는 ID도 성공한다. thread_id는 공백 제외 1~100자다.
+같은 대화의 진행 중인 요청이 끝난 뒤 초기화하며 다른 대화에는 영향을 주지 않는다.
+프론트는 성공 후 메시지를 비우고 새 ID를 발급한다. 실패하면 원래 대화를 유지한다.
+개발용 preview 모드는 서버 요청 없이 로컬 대화만 초기화한다.
 
 ### `POST /chat`
 요청
@@ -39,14 +51,20 @@
 
 | type | 언제 | 필드 |
 |---|---|---|
-| `RouteDecided` | 첫 이벤트 (v2) | `route`: `chat` \| `out_of_scope` \| `easy` \| `hard`, `reason`: 문자열 |
-| `PlanCreated` | hard만 | `tasks`: `[{id, agent, desc}]`, agent = `structured` \| `rag` \| `calc` |
-| `TaskCompleted` | 조사 작업마다 | `id`, `agent`, `ok`: bool, `retries`: int, `elapsed_ms`: int |
+| `RouteDecided` | 첫 이벤트 (v2) | `route`: `chat` \| `out_of_scope` \| `easy` \| `hard`, `reason`: 문자열, `rewrite`(후속 질문 재작성을 시도했을 때만): `{original, question, applied: bool, reason}` |
+| `PlanCreated` | hard만 | `tasks`: `[{id, agent, desc}]`, agent = `structured` \| `rag` \| `calc`; `planner`: `llm` \| `rule` (LLM 계획이 실패하면 `rule`이고 `reason`에 이유), `reason`: 문자열, `removed`: 문자열 배열 |
+| `TaskCompleted` | 조사 작업마다 | `id`, `agent`, `ok`: bool, `retries`: int, `elapsed_ms`: int, `error`: 문자열 \| null (실패 원문. 개발·추적용이며 사용자 화면에는 `FinalAnswer.warnings`의 고정 문구만 보인다) |
 | `ReplanCheck` | hard만 | `round`: int, `is_sufficient`: bool, `reason`: 문자열 |
 | `Validation` | 답 작성 후 | `attempt`: int, `verdict`: `pass` \| `fail`, `reason`: 문자열 \| null |
+| `AnswerProgress` | 각 답변 작성 시작 및 작성 종료 후 검증 직전 | `stage`: `writing` \| `validating`, `attempt`: int. `validating`에는 `writing_ms`: int (해당 회차 작성 시간, LLM 호출·입력 준비 포함) |
 
 `route` 의미: `chat` 인사·잡담(검색 없음), `out_of_scope` 금융상품 범위 밖(정중히 거절),
 `easy` 단일 상품 사실 조회(즉답 경로), `hard` 비교·집계·계산(계획·도구·검증 경로).
+
+`RouteDecided.intent`는 선택 필드이며 대화 회상(`recall`)도 `route=chat`이다.
+`Validation=pass`는 구현된 수치·근거 및 요청 항목 검사 통과를 뜻하며, 모든 자연어 의미의 정확성을 보장하지 않는다.
+현재 완료 조건은 명시적 여러 상품 비교의 상품별 금리, 가입대상·가입방법·가입제한,
+요청한 세전·세후 이자와 부족한 조회 개수의 명시를 검사한다. 가입 정보는 공시 원문 일치 기준이다.
 
 ## 3. 종료 이벤트
 
@@ -98,7 +116,9 @@
 {"version": "v2", "latency_ms": 8423, "llm_calls": 2, "retries": 0, "validation_attempts": 1,
  "cost_usd": 0.0172, "data_month": "202609", "thread_id": "t-1", "prompt_tokens": 1247, "completion_tokens": 140}
 ```
-- `cost_usd`는 로컬 추론 기준 가상 단가로 계산한 값이다(실과금 아님).
+- `writing_runs`는 작성 회차별 목록이다(없으면 `[]`). 각 항목은 `attempt`, `writing_ms`, 제공된 경우 `prompt_tokens`, `completion_tokens`, `load_ms`, `prompt_ms`, `gen_ms`를 포함한다. 시간 단위는 밀리초이며 공급자가 제공하지 않은 단계별 시간은 생략한다. 전체 응답 시간이 아닌 작성 호출 측정값이다.
+- 대화 화면은 답변·상품·계산 카드, 분석 과정은 진행·검증·계산식·주의 문구·실행 정보, 출처 화면은 조회 상품 식별 정보와 원문 인용을 표시한다. 이전 저장 답변에 인용이 없으면 상품 출처 정보만 표시하고 그 한계를 명시한다.
+- `cost_usd`는 토큰 단가 기반 추정치다. Ollama는 가상 비용이고 OpenAI는 실제 과금되는 호출의 추정 비용이며, 청구서 금액을 의미하지 않는다. 캐시 할인·실행 전후의 별도 호출 비용은 반영하지 않는다.
 
 ### `Error`
 ```json

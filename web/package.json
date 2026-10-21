@@ -4,9 +4,25 @@
   "description": "FinAgent - Financial Product Grounding Agent Web Interface",
   "main": "server.js",
   "scripts": {
-    "start": "node server.js",
-    "dev": "node server.js"
+    "start": "npm run build && node server.js",
+    "dev": "vite",
+    "build": "vite build",
+    "test": "npm run build && node --test *.test.cjs",
+    "format": "prettier --write .",
+    "format:check": "prettier --check ."
   },
-  "keywords": ["finagent", "sse", "financial-grounding"],
-  "license": "ISC"
+  "keywords": [
+    "finagent",
+    "sse",
+    "financial-grounding"
+  ],
+  "license": "ISC",
+  "dependencies": {
+    "vue": "^3.5.44"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-vue": "^6.0.10",
+    "prettier": "3.9.10",
+    "vite": "^8.3.4"
+  }
 }

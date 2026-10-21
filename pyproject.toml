@@ -16,14 +16,28 @@ dependencies = [
     "numpy",
     "python-dotenv>=1.2.4",
     "openai>=3.35.1",
+    "langchain>=1.4.6",  # create_agent·init_chat_model
+    "langchain-openai>=1.7.2",
+    "langchain-ollama>=1.1.0",
 ]
 
 [dependency-groups]
-dev = ["pytest"]
+dev = [
+    "pytest",
+    "ruff==0.15.22",
+]
 
 [tool.pytest.ini_options]
 pythonpath = ["src"]
 testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 80
+target-version = "py311"
+extend-exclude = ["eval/results", "graphify-out", ".archify"]
+
+[tool.ruff.lint]
+extend-select = ["I"]
 
 [build-system]
 requires = ["hatchling"]

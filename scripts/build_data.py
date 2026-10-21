@@ -1,15 +1,20 @@
 """data/raw/*.json -> data/md/{kind}/{group}/{id}.md. 실행할 때마다 이전에 생성한 .md를 지우고 다시 만든다."""
+
 from collections import Counter
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parents[1]
 from finagent.parser import parse_all, to_markdown
+
+ROOT = Path(__file__).resolve().parents[1]
 
 
 def main() -> None:
+    """원본 JSON을 파싱해 data/md 아래 상품 마크다운을 새로 만든다."""
     products = parse_all(ROOT / "data/raw")
     md_dir = ROOT / "data/md"
-    for old in md_dir.rglob("*.md"):  # 이 스크립트의 생성물만 지운다(사라진 상품이 남지 않게)
+    for old in md_dir.rglob(
+        "*.md"
+    ):  # 이 스크립트의 생성물만 지운다(사라진 상품이 남지 않게)
         old.unlink()
     n = Counter()
     for p in products:
@@ -20,7 +25,9 @@ def main() -> None:
     for (kind, group), c in sorted(n.items()):
         print(f"{kind:9} {group:12} {c:4}")
     flagged = [p for p in products if p.flags]
-    print(f"합계 {len(products)}개, 데이터 주의 {len(flagged)}개, 금리 옵션 없음 {sum(1 for p in products if not p.options)}개")
+    print(
+        f"합계 {len(products)}개, 데이터 주의 {len(flagged)}개, 금리 옵션 없음 {sum(1 for p in products if not p.options)}개"
+    )
 
 
 if __name__ == "__main__":
