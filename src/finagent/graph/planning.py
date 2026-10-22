@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import re
-
 from langsmith import traceable
 
 from ..catalog import LOAN_KINDS, METRIC_KO, METRICS, filters_for
@@ -11,8 +9,6 @@ from ..parser import KIND_KO
 from ..schemas import LLMOutputError, PlanInput, PlanOutput
 from ..slots import Slots
 from .calls import _failed_usage, _llm
-
-TEXT_CUE = r"우대|조건|가입|대상|수수료|연체|한도|해지|유의|방법|언제|누가"
 
 PLAN_SYSTEM = (
     "금융상품 질문의 작업 계획자다. 질문을 읽고 필요한 조사 작업만 "
@@ -54,7 +50,7 @@ def _rule_specs(q: str, s: Slots) -> list[tuple[str, str | None]]:
     ]
     if s.amount_won:
         specs.append(("calc", None))
-    if re.search(TEXT_CUE, q) or (s.product_ids and not s.compare):
+    if s.docs or (s.product_ids and not s.compare):
         specs.append(("rag", None))
     return specs
 
@@ -139,8 +135,7 @@ async def _llm_specs(
 async def plan_node(state, deps) -> dict:
     """hard 질문을 서브에이전트 task로 나눈다(PLANNER=llm이면 LLM 계획+게이트, 실패하면 규칙 계획)."""
     q, s = state["query"], Slots(**state["slots"])
-    m = re.search(r"(\d+)\s*개(?!월)", q)  # '12개월'은 개수가 아니다
-    limit = int(m.group(1)) if m else 5
+    limit = s.count or 5
 
     def query_args(kind: str) -> dict:
         """그 종류에 적용되는 인자만 담은 query_products 인자를 만든다."""
@@ -154,6 +149,11 @@ async def plan_node(state, deps) -> dict:
             "credit_score": s.credit_score if kind == "credit" else None,
             "filters": filters_for(kind, s.filters) or None,
             "limit": limit,
+            "rank": s.rank,
+            "exclude_ids": [
+                i for i in s.exclude_ids if deps.catalog.by_id[i].kind == kind
+            ]
+            or None,
         }
         ids = [i for i in s.product_ids if deps.catalog.by_id[i].kind == kind]
         if ids:
@@ -173,7 +173,7 @@ async def plan_node(state, deps) -> dict:
         specs = _rule_specs(q, s)
     # 명시적 조회·계산 요청은 계획자가 빠뜨려도 실행 계획에 남긴다.
     required = [item for item in _rule_specs(q, s) if item[0] != "rag"]
-    if m and limit > 1:
+    if s.count and s.count > 1:
         required += [("structured", kind) for kind in s.kinds]
     added = []
     for agent, kind in required:
@@ -189,28 +189,29 @@ async def plan_node(state, deps) -> dict:
     for agent, kind in specs:
         if agent == "structured":
             a = query_args(kind)
-            tasks.append(
-                _task(
-                    len(tasks) + 1,
-                    "structured",
-                    f"{KIND_KO[kind]} {METRIC_KO.get(a.get('metric', ''), '금리')} 조회",
-                    a,
+            # '그거랑 2위 비교'는 지정 상품 조회와 시장 순위 조회를 따로 실행해 함께 보여준다.
+            split = "product_ids" in a and a.get("rank") is not None
+            for args in (
+                [
+                    {k: v for k, v in a.items() if k != "rank"},
+                    {k: v for k, v in a.items() if k != "product_ids"},
+                ]
+                if split
+                else [a]
+            ):
+                tasks.append(
+                    _task(
+                        len(tasks) + 1,
+                        "structured",
+                        f"{KIND_KO[kind]} {METRIC_KO.get(args.get('metric', ''), '금리')} 조회",
+                        args,
+                    )
                 )
-            )
         elif agent == "calc":
             # 계산 유형은 사용자 슬롯으로 확정하고 LLM 종류 제안에 맡기지 않는다.
             kind = next(iter(s.kinds), None)
-            loan = (
-                (kind in LOAN_KINDS)
-                if kind
-                else (
-                    any(k in LOAN_KINDS for k in s.kinds)
-                    or bool(re.search(r"빌리|빌려|대출|갚|상환", q))
-                )
-            )
-            monthly = s.monthly or bool(
-                re.search(r"매달|매월|월\s*얼마|한\s*달에", q)
-            )
+            loan = kind in LOAN_KINDS
+            monthly = s.monthly
             ptype = (
                 "loan"
                 if loan
@@ -227,14 +228,14 @@ async def plan_node(state, deps) -> dict:
                 "rate_pct": s.rate_pct,
                 "mode": "goal" if s.goal else "forward",
             }
-            if ptype == "loan" and "만기일시" in q:
-                args["repayment"] = "bullet"
-            elif ptype == "loan" and "원리금균등" in q:
-                args["repayment"] = "equal_payment"
-            elif ptype != "loan" and "복리" in q:
-                args["interest_type"] = "compound"
-            elif ptype != "loan" and "단리" in q:
-                args["interest_type"] = "simple"
+            if ptype == "loan" and s.repayment in ("bullet", "equal_payment"):
+                args["repayment"] = s.repayment
+            elif ptype != "loan" and s.filters.get("rate_type_nm"):
+                args["interest_type"] = (
+                    "compound"
+                    if s.filters["rate_type_nm"] == "복리"
+                    else "simple"
+                )
             rate_kind = kind or next(
                 (k for k in s.kinds if (k in LOAN_KINDS) == loan), None
             )
@@ -284,18 +285,16 @@ async def plan_node(state, deps) -> dict:
 @traceable(name="gate_node")
 async def gate_node(state, deps) -> dict:
     """계획을 코드로 검사한다(베이스 권위 게이트). 실행 불가능한 task는 빼고, 필요한 정보는 되묻는다."""
-    kept, clarify = [], None
+    kept, clarify, s = [], None, state["slots"]
     for t in state["tasks"]:
         a, rq = t["args"], t.get("rate_query") or {}
         if (
             t["agent"] == "calc"
             and a["product_type"] != "loan"
-            and re.search(
-                r"(?:매월|매달|월별)\s*(?:받[는을]\s*)?이자", state["query"]
-            )
+            and s.get("monthly_payout")
         ):
             clarify = "현재 계산은 만기까지의 총이자를 지원합니다. 월별 지급 이자는 지급 조건이 필요해 계산할 수 없어요. 만기 총이자로 계산할지 알려주세요."
-        elif t["agent"] == "calc" and "원금균등" in state["query"]:
+        elif t["agent"] == "calc" and s.get("repayment") == "equal_principal":
             clarify = "원금균등 상환 계산은 지원하지 않습니다. 원리금균등 또는 만기일시 방식으로 계산할지 알려주세요."
         elif (
             t["agent"] == "structured"

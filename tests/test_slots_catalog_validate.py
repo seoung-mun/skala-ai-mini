@@ -1,7 +1,7 @@
-import json
 from pathlib import Path
 
 import pytest
+from legacy_rules import extract
 
 from finagent.catalog import (
     Catalog,
@@ -11,7 +11,7 @@ from finagent.catalog import (
     score_band,
 )
 from finagent.parser import parse_all, parse_rows
-from finagent.slots import extract, months, route_rules, won_amounts
+from finagent.slots import months, won_amounts
 from finagent.validate import check_answer, financial_values
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -316,56 +316,17 @@ def test_metric_whitelist_blocks_average_rate_ranking():
 
 # ---------- 실데이터 회귀 ----------
 @pytest.mark.skipif(not HAS_RAW, reason="data/raw 없음")
-def test_rule_routing_on_routing_set_and_golden():
-    """규칙 라우팅이 라우팅셋·골든셋의 정답 경로와 맞는다."""
-    cat = Catalog(parse_all(ROOT / "data/raw"))
-    for fn, label in (
-        ("eval/routing_set.jsonl", "route"),
-        ("eval/golden.jsonl", None),
-    ):
-        for line in (ROOT / fn).read_text().splitlines():
-            r = json.loads(line)
-            if r.get(
-                "setup"
-            ):  # 후속 질문은 직전 대화 슬롯이 있어야 판단 가능 — 그래프 테스트에서 검증
-                continue
-            gold = (
-                r["route"]
-                if label
-                else (
-                    {"chat": "chat", "out_of_scope": "out_of_scope"}.get(
-                        r["category"]
-                    )
-                    or r["difficulty"]
-                )
-            )
-            assert (
-                route_rules(r["query"], extract(r["query"], cat))[0] == gold
-            ), r["id"]
-
-
-@pytest.mark.skipif(not HAS_RAW, reason="data/raw 없음")
 def test_catalog_reproduces_golden_compare_answers():
-    """카탈로그 조회가 골든 비교 문항의 정답을 재현한다."""
+    import runpy
+
+    suite = runpy.run_path(str(ROOT / "eval/build_golden.py"))["make_suite"]()
     cat = Catalog(parse_all(ROOT / "data/raw"))
-    golden = {
-        json.loads(row_text)["id"]: json.loads(row_text)
-        for row_text in (ROOT / "eval/golden.jsonl").read_text().splitlines()
-    }
-    for gid in ("H1", "H2", "H5", "H7"):
-        s = extract(golden[gid]["query"], cat)
-        rows = cat.query(
-            s.kinds[0],
-            group=s.group,
-            term_months=s.term_months,
-            metric=s.metric,
-            credit_score=s.credit_score,
-            filters=s.filters,
-            limit=1,
-        )
-        assert set(golden[gid]["check"]["values"]) & (
-            {r["product"] for r in rows} | {r["bank"] for r in rows}
-        ), gid
+    for item in suite:
+        args = item.get("oracle", {}).get("query_args")
+        if args:
+            assert {r["product_id"] for r in cat.query(**args)} == set(
+                item["gold_ids"]
+            )
 
 
 def test_split_citations_keeps_only_verbatim_quotes():
@@ -407,22 +368,20 @@ def test_spread_metric_and_attribute_check():
 
 
 @pytest.mark.skipif(not HAS_RAW, reason="data/raw 없음")
-def test_spread_matches_golden_preferential_margin():
-    """금리표 차이(최고-기본)가 설명 원문의 우대 폭과 같다 — v2 오답 4문항(E2·S3·S4·N10) 실데이터 확인."""
+def test_spread_comes_from_public_rate_options():
     cat = Catalog(parse_all(ROOT / "data/raw"))
-    golden = {
-        json.loads(row_text)["id"]: json.loads(row_text)
-        for row_text in (ROOT / "eval/golden.jsonl").read_text().splitlines()
-    }
-    for gid in ("E2", "S3", "S4", "N10"):
-        g = golden[gid]
-        rows = cat.query(
-            "saving",
-            metric="spread",
-            product_ids=g["gold_ids"],
-            term_months=extract(g["query"], cat).term_months,
-        )
-        assert rows[0]["value"] == g["check"]["values"][0], gid
+    for product in cat.products:
+        if product.kind != "saving":
+            continue
+        for option in product.options:
+            if (
+                option.get("rate") is not None
+                and option.get("rate_max") is not None
+            ):
+                assert (
+                    round(option["rate_max"] - option["rate"], 2)
+                    == option["spread"]
+                )
 
 
 @pytest.mark.parametrize(

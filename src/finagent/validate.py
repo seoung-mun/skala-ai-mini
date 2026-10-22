@@ -111,7 +111,11 @@ def split_citations(
     kept, dropped = [], []
     for c in citations:
         pid, quote = c.get("product_id", "").strip(" []"), c.get("quote", "")
-        if "|" in quote:
+        if "|" in quote and not (
+            c.get("section") == "금리표"
+            and section_sources is not None
+            and quote == section_sources.get(pid, {}).get("금리표")
+        ):
             dropped.append(f"금리표 인용: {quote[:30]}")
         elif (
             pid not in sections

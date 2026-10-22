@@ -157,12 +157,15 @@ def test_ollama_parse_error_preserves_observed_usage(structured):
     "failed", [completion("not json"), completion("", finish_reason="length")]
 )
 def test_graph_retry_totals_include_failed_http_response(failed):
-    from test_graph import CAT, A, B, FakeMCP, FakeRetriever
+    from test_graph import CAT, A, B, FakeMCP, FakeRetriever, route_reply
 
     from finagent.deps import Deps
     from finagent.graph.build import build_graph, run_v2
 
     responses = [
+        completion(
+            json.dumps(route_reply(kinds=["saving"], products=["가나적금"]))
+        ),
         failed,
         completion(
             json.dumps(
@@ -204,10 +207,10 @@ def test_graph_retry_totals_include_failed_http_response(failed):
         )
 
     assert state["verified"] is True
-    assert len(sent) == final["metadata"]["llm_calls"] == 2
-    assert final["metadata"]["prompt_tokens"] == 200
-    assert final["metadata"]["completion_tokens"] == 20
-    assert final["metadata"]["cost_usd"] == 0.000112
+    assert len(sent) == final["metadata"]["llm_calls"] == 3
+    assert final["metadata"]["prompt_tokens"] == 300
+    assert final["metadata"]["completion_tokens"] == 30
+    assert final["metadata"]["cost_usd"] == 0.000168
     assert [run["prompt_tokens"] for run in state["writing_runs"]] == [100, 100]
     assert [run["completion_tokens"] for run in state["writing_runs"]] == [
         10,

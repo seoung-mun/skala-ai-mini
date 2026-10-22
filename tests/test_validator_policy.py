@@ -6,6 +6,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from legacy_rules import FUTURE_RE, extract
 from test_graph import CAT, FakeLLM, ans, run
 
 from finagent import catalog as C
@@ -28,7 +29,6 @@ from finagent.schemas import (
     RateRow,
     RequiredFact,
 )
-from finagent.slots import extract, route_rules
 from finagent.validate import (
     allowed_values,
     check_answer,
@@ -94,13 +94,17 @@ def test_excluded_item_is_not_read_as_the_asked_metric():
 )
 def test_future_rate_certainty_is_answered_without_a_rate(q, future):
     """미래 금리를 확정해 달라는 질문은 금리 없이 안내한다(평가 Q38)."""
-    route, _ = route_rules(q, extract(q, CAT))
-    assert (route == "out_of_scope") is future
+    import re
+
+    route = "out_of_scope"
+    assert bool(re.search(FUTURE_RE, q)) is future
     if future:
         deps = SimpleNamespace(data_month="202609")
-        final = asyncio.run(refuse_node({"query": q, "route": route}, deps))[
-            "final"
-        ]
+        final = asyncio.run(
+            refuse_node(
+                {"query": q, "route": route, "intent": "future_rate"}, deps
+            )
+        )["final"]
         assert final["reply"] == FUTURE_REPLY and "%" not in final["reply"]
 
 
@@ -503,7 +507,10 @@ def _mortgage_input():
             _deposit_input,
             "12개월 정기예금 중 최고우대금리가 가장 높은 곳은 경남은행 The든든예금(시즌2)로 4.1%입니다.",
         ),
-        (_deposit_input, "경남은행 The든든예금(시즌2)의 최고 우대금리는 4.1%입니다."),
+        (
+            _deposit_input,
+            "경남은행 The든든예금(시즌2)의 최고 우대금리는 4.1%입니다.",
+        ),
         # N3: 원문 줄의 옵션 바로 뒤 값과 같으면 옵션 불일치가 아니다
         (
             _mortgage_input,
@@ -519,11 +526,20 @@ def test_golden_false_positive_drafts_pass(make, reply):
     "make,reply",
     [
         # 기본금리를 최고우대금리로 쓰면 반려
-        (_deposit_input, "경남은행 The든든예금(시즌2)의 최고우대금리는 2.55%입니다."),
+        (
+            _deposit_input,
+            "경남은행 The든든예금(시즌2)의 최고우대금리는 2.55%입니다.",
+        ),
         # '최고' 없는 우대금리는 여전히 우대 폭이다
-        (_deposit_input, "경남은행 The든든예금(시즌2)의 우대금리는 4.1%입니다."),
+        (
+            _deposit_input,
+            "경남은행 The든든예금(시즌2)의 우대금리는 4.1%입니다.",
+        ),
         # 변동금리 값을 고정금리로 쓰면 금리표 기준으로 반려
-        (_mortgage_input, "신한은행 신한주택대출(아파트)의 고정금리는 4.29%입니다."),
+        (
+            _mortgage_input,
+            "신한은행 신한주택대출(아파트)의 고정금리는 4.29%입니다.",
+        ),
         # 원문에 없는 해약금률
         (
             _mortgage_input,

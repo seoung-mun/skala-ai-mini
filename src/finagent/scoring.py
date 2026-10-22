@@ -89,6 +89,33 @@ def score(item: dict, result: dict) -> dict:
         )
     elif kind == "nonempty":
         correct = bool(ans.strip())
+    elif kind == "recommendation":
+        picked = first_mention(ans, chk["candidates"])
+        winners_ok = (
+            {p["id"] for p in result["products"]} == set(chk["product_ids"])
+            if "products" in result and "product_ids" in chk
+            else picked in {_squash(v) for v in vals}
+            and all(_squash(v) in _squash(ans) for v in vals)
+        )
+        correct = (
+            winners_ok
+            and chk["value"] in asserted_values(ans, q, chk["unit"])
+            and not _negated(ans, chk["value"])
+            and (
+                not chk.get("terms_any")
+                or any(t in ans for t in chk["terms_any"])
+            )
+        )
+    elif kind == "clarification":
+        correct = all(
+            any(_squash(v) in _squash(ans) for v in group)
+            for group in chk["groups"]
+        )
+        if chk.get("forbid_guarantee"):
+            correct = correct and not re.search(
+                r"(?:무조건|반드시|누구나).{0,12}(?:가입됩니다|가입가능합니다|수익보장|받을수있습니다)",
+                _squash(ans),
+            )
     else:
         raise ValueError(f"알 수 없는 채점 방식: {kind}")
     gold, need = item.get("gold_ids") or [], item.get("retrieval")

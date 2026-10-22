@@ -25,16 +25,20 @@ from pathlib import Path
 
 from finagent.baseline import run_baseline
 from finagent.config import load_config
-from finagent.graph.build import build_graph, run_v2
+from finagent.graph.build import build_graph, next_slots, run_v2
 from finagent.graph.nodes import collected
-from finagent.llm import build_llm
+from finagent.llm import build_llm, session_context
 from finagent.scoring import score
 from finagent.search import KeywordIndex
 from finagent.server import default_runtime
 
 ROOT = Path(__file__).resolve().parents[1]
 RES = ROOT / "eval/results"
-EXPECTED_ROUTE = {"chat": "chat", "out_of_scope": "out_of_scope"}
+EXPECTED_ROUTE = {
+    "chat": "chat",
+    "recall": "chat",
+    "out_of_scope": "out_of_scope",
+}
 
 
 def expected_route(it: dict) -> str:
@@ -59,7 +63,19 @@ async def run_baseline_only(
         for it in golden:
             if (it["id"], rep) in completed:
                 continue
-            r = await asyncio.to_thread(run_baseline, it["query"], index, llm)
+            history = []
+            if it.get("setup"):
+                first = await asyncio.to_thread(
+                    run_baseline, it["setup"], index, llm
+                )
+                history = [
+                    {"role": "user", "content": it["setup"]},
+                    {"role": "assistant", "content": first["answer"]},
+                ]
+            with session_context(history):
+                r = await asyncio.to_thread(
+                    run_baseline, it["query"], index, llm
+                )
             res = {
                 "answer": r["answer"],
                 "retrieved": r["retrieved"],
@@ -106,7 +122,7 @@ async def run_system(
             for it in golden:
                 if (it["id"], rep) in completed:
                     continue
-                # v2 (v1은 run_baseline_only — 대화 메모리가 없어 setup 질문을 쓰지 않는다)
+                # 두 시스템 모두 setup의 실제 질문·답변을 같은 세션 기록으로 전달한다.
                 prev, history = None, []
                 if it.get(
                     "setup"
@@ -114,7 +130,7 @@ async def run_system(
                     f0, s0 = await run_v2(
                         app, rt.deps, it["setup"], thread_id=f"{it['id']}-{rep}"
                     )
-                    prev = s0.get("slots")
+                    prev = next_slots(s0)
                     history = [
                         {"role": "user", "content": it["setup"]},
                         {"role": "assistant", "content": f0["reply"]},
@@ -134,6 +150,8 @@ async def run_system(
                 )  # 서브에이전트 결과에서 근거로 쓴 상품
                 res = {
                     "answer": final["reply"],
+                    "products": final["products"],
+                    "calculations": final["calculations"],
                     "route": final["route"],
                     "retrieved": list(
                         dict.fromkeys(

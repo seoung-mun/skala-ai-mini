@@ -20,8 +20,9 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel
 
 from .baseline import run_baseline
-from .graph.build import build_graph, initial_state, with_metadata
+from .graph.build import build_graph, initial_state, next_slots, with_metadata
 from .graph.nodes import WARNING
+from .llm import session_context
 from .schemas import LLMOutputError
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -227,33 +228,34 @@ def create_app(make_runtime=default_runtime) -> FastAPI:
         """진행 이벤트(dict)들을 내보내고 마지막에 FinalAnswer를 내보낸다. 실패하면 Error."""
         rt = app.state.rt
         try:
-            if rt.version == "v1":
-                final, slots = await run_v1(rt, message, thread_id), None
-            else:
-                history, prev = rt.sessions.load(thread_id)
-                t0, state = time.perf_counter(), {}
-                async for mode, payload in rt.graph.astream(
-                    initial_state(message, thread_id, history, prev),
-                    stream_mode=["updates", "values", "custom"],
-                ):
-                    if mode == "custom":
-                        yield payload
-                        continue
-                    if mode == "values":
-                        state = payload
-                        continue
-                    for delta in payload.values():
-                        for ev in (delta or {}).get("events", []):
-                            yield ev
-                final = with_metadata(
-                    state["final"],
-                    state,
-                    version="v2",
-                    thread_id=thread_id,
-                    latency_ms=int((time.perf_counter() - t0) * 1000),
-                    data_month=rt.deps.data_month,
-                )
-                slots = state.get("slots")
+            history, prev = rt.sessions.load(thread_id)
+            with session_context(history):
+                if rt.version == "v1":
+                    final, slots = await run_v1(rt, message, thread_id), None
+                else:
+                    t0, state = time.perf_counter(), {}
+                    async for mode, payload in rt.graph.astream(
+                        initial_state(message, thread_id, history, prev),
+                        stream_mode=["updates", "values", "custom"],
+                    ):
+                        if mode == "custom":
+                            yield payload
+                            continue
+                        if mode == "values":
+                            state = payload
+                            continue
+                        for delta in payload.values():
+                            for ev in (delta or {}).get("events", []):
+                                yield ev
+                    final = with_metadata(
+                        state["final"],
+                        state,
+                        version="v2",
+                        thread_id=thread_id,
+                        latency_ms=int((time.perf_counter() - t0) * 1000),
+                        data_month=rt.deps.data_month,
+                    )
+                    slots = next_slots(state)
             rt.sessions.append(thread_id, message, final["reply"], slots)
             yield {"type": "FinalAnswer", **final}
         except Exception as e:  # 계약상 스트림은 Error 이벤트로 끝나야 한다 — 원인은 메시지에 남긴다

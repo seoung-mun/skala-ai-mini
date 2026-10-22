@@ -158,23 +158,24 @@ def test_top_choice_named_products_in_question_still_judged_by_first_pick():
     )["correct"]
 
 
-def test_golden_candidates_exclude_generic_names():
-    """골든 후보 목록에 일반명 상품명이 없다."""
-    import json
+def test_golden_queries_do_not_require_product_names():
+    import importlib.util
     from pathlib import Path
 
-    g = {
-        json.loads(row_text)["id"]: json.loads(row_text)
-        for row_text in (
-            Path(__file__).resolve().parents[1] / "eval/golden.jsonl"
-        )
-        .read_text()
-        .splitlines()
-    }
-    assert (
-        "정기예금" not in g["H2"]["check"]["candidates"]
-        and "The든든예금(시즌2)" in g["H2"]["check"]["candidates"]
+    root = Path(__file__).resolve().parents[1]
+    spec = importlib.util.spec_from_file_location(
+        "user_golden", root / "eval/build_golden.py"
     )
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    suite = module.make_suite()
+    assert len(suite) == 43
+    assert sum(i["category"] == "earnings" for i in suite) == 8
+    assert sum(bool(i.get("setup")) for i in suite) >= 9
+    for item in suite:
+        if "query_args" in item.get("oracle", {}):
+            rows = module.CAT.query(**item["oracle"]["query_args"])
+            assert set(item["gold_ids"]) == {r["product_id"] for r in rows}
 
 
 def test_first_mention_prefers_longer_name_at_same_position():
@@ -188,6 +189,46 @@ def test_first_mention_prefers_longer_name_at_same_position():
         )
         == "카카오뱅크26주적금"
     )
+
+
+def test_user_recommendation_requires_winners_and_actual_earnings():
+    check = {
+        "type": "recommendation",
+        "values": ["가은행 가적금", "나은행 나적금"],
+        "candidates": ["가은행 가적금", "나은행 나적금", "다은행 다적금"],
+        "value": 67362,
+        "unit": "won",
+    }
+    it = item(check, gold=())
+    good = "가은행 가적금과 나은행 나적금이 공동 1위이며 세후 이자는 67,362원입니다."
+    assert score(it, {"answer": good, "retrieved": []})["correct"]
+    for bad in (
+        good.replace("67,362", "79,625"),
+        good.replace("과 나은행 나적금", ""),
+        "다은행 다적금이 1위입니다. " + good,
+    ):
+        assert not score(it, {"answer": bad, "retrieved": []})["correct"]
+
+
+def test_clarification_requires_missing_fields_and_rejects_guaranteed_eligibility():
+    it = item(
+        {
+            "type": "clarification",
+            "groups": [["금액"], ["기간"]],
+            "forbid_guarantee": True,
+        },
+        gold=(),
+    )
+    assert score(it, {"answer": "금액과 기간을 알려주세요.", "retrieved": []})[
+        "correct"
+    ]
+    assert not score(
+        it,
+        {
+            "answer": "금액과 기간은 상관없이 누구나 가입가능합니다.",
+            "retrieved": [],
+        },
+    )["correct"]
 
 
 class FakeLLM:

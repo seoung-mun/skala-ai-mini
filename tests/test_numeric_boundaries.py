@@ -2,7 +2,7 @@
 
 import pytest
 
-from finagent.slots import asks_recall, months, won_amounts
+from finagent.slots import months, won_amounts
 from finagent.validate import check_answer, unit_values
 
 
@@ -77,21 +77,6 @@ def test_compound_money_is_one_claim_and_values_remain_in_order():
     ]
 
 
-@pytest.mark.parametrize(
-    ("question", "expected"),
-    [
-        ("마지막으로 금리 비교 요청 어떤 게 좋아?", False),
-        ("내가 예금 비교 질문하면 어떤 상품이 좋아?", False),
-        ("내가 방금 뭐라고 질문했어?", True),
-        ("내가 아까 예금 금리 뭐라고 물었어?", True),
-        ("마지막으로 어떤 질문했어?", True),
-        ("내 이전 질문 원문 다시 알려줘", True),
-    ],
-)
-def test_recall_vs_new_financial_request(question, expected):
-    assert asks_recall(question) is expected
-
-
 def test_percentage_precision_is_not_rounded_into_allowed_value():
     assert not check_answer(
         "9.994퍼센트", {"pct": {9.99}, "won": set()}, [], {}
@@ -107,14 +92,14 @@ def test_recall_false_positive_still_reaches_financial_route():
     import asyncio
     from types import SimpleNamespace
 
-    from test_graph import CAT
+    from test_graph import CAT, FakeLLM
 
     from finagent.graph.nodes import route_node
 
     result = asyncio.run(
         route_node(
             {"query": "마지막으로 금리 비교 요청 어떤 게 좋아?"},
-            SimpleNamespace(catalog=CAT),
+            SimpleNamespace(catalog=CAT, llm=FakeLLM()),
         )
     )
     assert result["route"] == "hard"
@@ -122,9 +107,8 @@ def test_recall_false_positive_still_reaches_financial_route():
 
 
 def test_amount_term_and_rate_are_extracted_independently():
+    from legacy_rules import extract
     from test_graph import CAT
-
-    from finagent.slots import extract
 
     slots = extract("주담대 3억 30년 4.5%면 월 상환액 얼마야?", CAT)
     assert slots.amount_won == 300_000_000

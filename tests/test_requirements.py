@@ -207,7 +207,7 @@ def test_original_two_turns_with_real_catalog_and_mcp(tmp_path):
         + calculation
     )
     complete = "\n".join(lines) + "\n" + calculation
-    llm = FakeLLM(ans(bad), ans(complete))
+    llm = FakeLLM(ans(bad), ans(complete), {"ok": True, "reply": question})
 
     async def runtime():
         mcp = MCPClient()
@@ -257,7 +257,7 @@ def test_original_two_turns_with_real_catalog_and_mcp(tmp_path):
         )
         assert second[0]["intent"] == "recall" and second[-1]["route"] == "chat"
         assert question in second[-1]["reply"] and not second[-1]["products"]
-        assert len(llm.inputs) == previous_calls
+        assert len(llm.inputs) == previous_calls + 1
         assert not any(
             e["type"] in ("TaskCompleted", "Validation") for e in second
         )
@@ -351,22 +351,27 @@ def test_sources_use_exact_document_and_section_without_inventing_missing_text()
             }
         ],
     )
-    assert len(citations) == 2
+    assert len([c for c in citations if c["section"] != "금리표"]) == 2
     assert citations[0] == {
         "product_id": doc.product_id,
         "section": "가입 대상",
         "quote": source.text,
     }
     sections = {
-        d.product_id: "\n".join(s.text for s in d.descriptions)
+        d.product_id: "\n".join(
+            [*(s.text for s in d.descriptions), d.rate_table]
+        )
         for d in inp.documents
     }
     named = {
-        d.product_id: {s.section: s.text for s in d.descriptions}
+        d.product_id: {
+            **{s.section: s.text for s in d.descriptions},
+            "금리표": d.rate_table,
+        }
         for d in inp.documents
     }
     kept, dropped = split_citations(citations, sections, named)
-    assert len(kept) == 2 and not dropped
+    assert len(kept) == len(citations) and not dropped
     wrong = {**citations[0], "section": "우대조건"}
     assert not split_citations([wrong], sections, named)[0]
     invented = {**citations[0], "quote": "누구나 가입 가능 (만든 내용)"}
@@ -375,7 +380,63 @@ def test_sources_use_exact_document_and_section_without_inventing_missing_text()
     for fact in inp.required_facts:
         if fact.kind == "text":
             fact.value = ""
-    assert source_citations(inp, []) == []
+    assert all(c["section"] == "금리표" for c in source_citations(inp, []))
+
+
+def test_source_quotes_survive_missing_model_citations_but_not_invented_tables():
+    from finagent.requirements import source_citations
+    from finagent.validate import split_citations
+
+    _, inp = sample()
+    inp.question = "우대조건 알려줘"
+    inp.required_facts = []
+    cites = source_citations(inp, [])
+    assert any(c["section"] == "우대조건" for c in cites)
+    for c in cites:
+        doc = next(d for d in inp.documents if d.product_id == c["product_id"])
+        named = {
+            **{s.section: s.text for s in doc.descriptions},
+            "금리표": doc.rate_table,
+        }
+        sections = {doc.product_id: "\n".join(named.values())}
+        assert split_citations([c], sections, {doc.product_id: named}) == (
+            [c],
+            [],
+        )
+        if c["section"] == "금리표":
+            assert not split_citations(
+                [{**c, "quote": c["quote"] + "| 99% |"}],
+                sections,
+                {doc.product_id: named},
+            )[0]
+
+
+def test_credit_comparison_names_do_not_split_inside_other_product_names():
+    names = [
+        "일반신용대출",
+        "ONE신용대출",
+        "가계신용대출(일반)",
+        "협약금리 外 신용대출상품",
+        "신용대출",
+    ]
+    rows = [
+        RateRow(
+            product_id=str(i),
+            bank=f"은행{i}",
+            product=name,
+            option="701~800점",
+            metric="대출금리",
+            value=value,
+        )
+        for i, (name, value) in enumerate(
+            zip(names, [6.19, 6.78, 6.85, 7.08, 7.12])
+        )
+    ]
+    inp = AnswerInput(question="신용대출 금리 비교해줘", rows=rows)
+    inp.required_facts = build_requirements(inp)
+    reply = "\n".join(f"- {r.bank} {r.product}: {r.value}%" for r in rows)
+    assert not check_requirements(inp, reply)
+    assert check_requirements(inp, reply.replace("6.19%", "7.12%"))
 
 
 def test_collected_deduplicates_calculation_rate_without_losing_distinct_options():
@@ -398,7 +459,7 @@ def test_collected_deduplicates_calculation_rate_without_losing_distinct_options
                 "ok": True,
                 "rows": [row, {**row, "option": "12개월 단리"}],
             },
-            {"id": "c", "ok": True, "calc": {}, "rate_row": row},
+            {"id": "c", "ok": True, "calcs": [{}], "rate_rows": [row]},
         ],
     }
     # Task results are keyed by task_id in graph state.

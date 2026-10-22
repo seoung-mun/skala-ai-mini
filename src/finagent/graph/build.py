@@ -8,6 +8,7 @@ from pathlib import Path
 
 from langgraph.graph import END, START, StateGraph
 
+from ..llm import session_context
 from . import nodes as N
 from .agents import build_agents
 from .state import AgentState
@@ -41,7 +42,9 @@ def build_graph(deps):
         )  # fan-in: 같은 단계의 서브에이전트가 모두 끝난 뒤 1회 실행
     g.add_edge(START, "route")
     g.add_conditional_edges(
-        "route", N.after_route, ["chat_answer", "refuse", "plan", "rag_agent"]
+        "route",
+        N.after_route,
+        ["chat_answer", "refuse", "plan", "rag_agent", "finalize"],
     )
     g.add_edge("chat_answer", END)
     g.add_edge("refuse", END)
@@ -110,6 +113,15 @@ def with_metadata(
     }
 
 
+def next_slots(state: dict) -> dict | None:
+    """다음 턴에 넘길 조건. 답변에 실제로 나온 상품을 '그 상품' 후보로 남긴다."""
+    slots = state.get("slots")
+    shown = [p["id"] for p in (state.get("final") or {}).get("products", [])]
+    if not slots or not shown:
+        return slots
+    return {**slots, "product_ids": shown}
+
+
 async def run_v2(
     app,
     deps,
@@ -120,9 +132,10 @@ async def run_v2(
 ) -> tuple[dict, dict]:
     """한 번 실행해 (계약 형식 FinalAnswer, 최종 상태)를 돌려준다. 평가 스크립트가 쓴다."""
     t0 = time.perf_counter()
-    state = await app.ainvoke(
-        initial_state(query, thread_id, history or [], prev_slots)
-    )
+    with session_context(history or []):
+        state = await app.ainvoke(
+            initial_state(query, thread_id, history or [], prev_slots)
+        )
     final = with_metadata(
         state["final"],
         state,

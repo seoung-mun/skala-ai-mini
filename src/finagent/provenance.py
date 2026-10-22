@@ -83,6 +83,7 @@ def check_provenance(inp, reply: str, notes: list | None = None) -> list[str]:
             product if not re.fullmatch(CATEGORY_RE, squash(product)) else "",
             f"{bank} {product}",
             f"{bank_alias} {product}",
+            f"{bank_alias}의 {product}",  # '웰컴저축은행의 OO적금'을 은행·상품 두 대상으로 나누지 않는다
             bank,
             bank_alias,
         ):

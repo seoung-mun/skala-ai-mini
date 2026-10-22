@@ -68,6 +68,12 @@ def query_products(
     product_ids: Annotated[
         list[str] | None, Field(description="kind와 같은 종류의 상품 id")
     ] = None,
+    exclude_ids: Annotated[
+        list[str] | None,
+        Field(
+            description="이미 보여준 상품 id. '다른 대안'은 이 상품을 빼고 순위를 매긴다"
+        ),
+    ] = None,
     banks: Annotated[
         list[str] | None,
         Field(description="공시 금융회사명 그대로(예: '주식회사 카카오뱅크')"),
@@ -83,6 +89,13 @@ def query_products(
         ),
     ] = None,
     limit: Annotated[int, Field(ge=1, le=50)] = 5,
+    rank: Annotated[
+        int | None,
+        Field(
+            ge=1,
+            description="금리 순위(1부터). 같은 금리는 공동 순위로 모두 반환",
+        ),
+    ] = None,
 ) -> dict:
     """catalog.query를 감싼 금리 조회 도구. 모델에 보이는 설명은 description 인자에 있다."""
     try:
@@ -96,6 +109,8 @@ def query_products(
             banks=banks,
             filters=filters,
             limit=limit,
+            rank=rank,
+            exclude_ids=exclude_ids,
         )
         return ToolResult(
             ok=True, tool_name="query_products", data={"rows": rows}

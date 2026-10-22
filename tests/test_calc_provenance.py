@@ -83,8 +83,10 @@ async def resolve(catalog, *, metric=None, **overrides):
 def test_compound_option_reaches_the_actual_calculation_tool():
     async def run():
         work, deps = await resolve(catalog_for())
-        assert work["args"]["interest_type"] == "compound"
-        result = (await c_calculate({"work": work}, deps))["work"]["res"]
+        assert work["items"][0]["args"]["interest_type"] == "compound"
+        result = (await c_calculate({"work": work}, deps))["work"]["items"][0][
+            "res"
+        ]
         assert result["ok"]
         assert result["data"]["result"] == 365999
         assert result["data"]["inputs"]["interest_type"] == "compound"
@@ -127,8 +129,10 @@ def test_bullet_repayment_option_reaches_the_actual_calculation_tool():
         work, deps = await resolve(
             catalog_for("rent", repayment="만기일시상환방식")
         )
-        assert work["args"]["repayment"] == "bullet"
-        result = (await c_calculate({"work": work}, deps))["work"]["res"]
+        assert work["items"][0]["args"]["repayment"] == "bullet"
+        result = (await c_calculate({"work": work}, deps))["work"]["items"][0][
+            "res"
+        ]
         assert result["data"]["result"] == 30000
         assert result["data"]["inputs"]["repayment"] == "bullet"
 
@@ -154,7 +158,7 @@ def test_ambiguous_repayment_requires_an_explicit_assumption(repayment):
         )
     )
     assert "error" not in work
-    assert work["args"]["repayment"] == "equal_payment"
+    assert work["items"][0]["args"]["repayment"] == "equal_payment"
 
 
 @pytest.mark.parametrize(
@@ -172,6 +176,6 @@ def test_explicit_repayment_cannot_conflict_with_disclosed_option(
 
 def test_explicit_rate_calculation_keeps_its_existing_assumption_path():
     work, deps = asyncio.run(resolve(catalog_for(), rate_pct=4.0))
-    assert work["args"]["rate_pct"] == 4.0
-    assert work["rate_from"] is None
+    assert work["items"][0]["args"]["rate_pct"] == 4.0
+    assert work["items"][0]["rate_from"] is None
     assert not deps.mcp.calls

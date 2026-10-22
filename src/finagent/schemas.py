@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+import json
 import re
 from typing import Any, Literal
 
@@ -77,21 +78,127 @@ class RouteInput(BaseModel):
     """라우팅 LLM 입력."""
 
     question: str
+    history: list[dict[str, str]] = []
+    previous_conditions: dict[str, Any] | None = None
+    banks: list[str] = []
+    validation_error: str | None = None
 
     def to_prompt(self) -> str:
-        """질문을 한 줄 프롬프트로 만든다."""
-        return f"질문: {self.question}"
+        return (
+            f"## 이번 질문\n{self.question}\n\n"
+            f"## 직전 금융 조건 (지금 요청이 이어받는 경우에만 사용)\n"
+            f"{json.dumps(self.previous_conditions, ensure_ascii=False)}\n\n"
+            f"## 공시에 있는 금융회사명\n{', '.join(self.banks)}\n\n"
+            f"## 이전 해석의 검증 오류 (있으면 같은 원문을 다시 해석해 수정)\n{self.validation_error or '없음'}"
+        )
+
+
+class RouteFilters(StrictOutput):
+    """사용자가 명시하거나 후속 대화에서 유지한 옵션만. 적립·이자·대출 방식이 지정되지 않았으면 해당 필드는 null이며 기본값을 가정하지 않는다"""
+
+    rsrv_type_nm: Literal["정액적립식", "자유적립식"] | None
+    rate_type_nm: Literal["단리", "복리"] | None
+    mrtg_type_nm: Literal["아파트", "아파트외"] | None
+    rpay_type_nm: Literal["분할상환방식", "만기일시상환방식"] | None
+    lend_rate_type_nm: Literal["고정금리", "변동금리"] | None
+    crdt_prdt_type: Literal["1", "2", "3"] | None
+
+
+class RouteConditions(StrictOutput):
+    kinds: list[Literal["deposit", "saving", "mortgage", "rent", "credit"]]
+    group: Literal["bank", "savingsbank"] | None = Field(
+        description="사용자가 은행만이라고 하면 bank, 저축은행만이라고 하면 savingsbank. 금융권을 말하지 않았거나 둘 다 포함이면 null"
+    )
+    banks: list[str] = Field(
+        description="실제로 특정한 금융회사명만. 제한 없으면 []"
+    )
+    products: list[str] = Field(
+        description="이번 조회 대상을 특정한 상품명만. 전체 후보 비교면 []. '그거'가 공동 순위 여러 상품을 가리키면 모두 넣는다. '그거랑 2위'처럼 특정 상품과 순위 후보를 함께 비교하면 특정 상품만 넣고 rank를 지정한다"
+    )
+    metric: Literal["rate", "rate_max", "spread", "min", "max"] | None = Field(
+        description="예적금 기본금리=rate, 우대 충족 최고금리=rate_max, 우대 폭=spread, 대출 최저=min, 대출 최고=max. '금리 높은'·'이자 많이'·'제일 많이 버는'은 누구나 받는 기본금리 rate다. rate_max는 사용자가 우대 포함·최고금리를 명시했을 때만"
+    )
+    amount_won: int | None = Field(
+        ge=1,
+        description="사용자가 정한 원금·월 납입액·역산 목표를 원 단위 정수로. 단위를 생략한 저축 금액은 만원 단위다: '월 50씩'→500000, '1000 있어'→10000000, '50만원'→500000. 모르면 null",
+    )
+    monthly: bool = Field(description="매달 납입이면 true. 목돈 원금이면 false")
+    term_months: int | None = Field(
+        ge=1, description="사용자가 정한 기간을 개월로. 모르면 null"
+    )
+    credit_score: int | None = Field(ge=0, le=1000)
+    rate_pct: float | None = Field(
+        ge=0.1,
+        le=30,
+        description="사용자가 계산에 쓰라고 정한 연이율만. 상품에서 조회할 금리는 null",
+    )
+    calculation: Literal["none", "forward", "goal"] = Field(
+        description="계산 없음=none, 이자·상환액=forward, 목표금액 역산=goal. '2위면 얼마나 차이나'처럼 직전에 계산한 금액으로 다른 상품의 이자를 물으면 직전 금액·기간을 넣고 forward"
+    )
+    repayment: Literal["equal_payment", "bullet", "equal_principal"] | None = (
+        Field(
+            description="대출 계산 상환방식: 원리금균등=equal_payment, 만기일시=bullet, 원금균등=equal_principal. 말하지 않았으면 null"
+        )
+    )
+    monthly_payout: bool = Field(
+        description="예적금 이자를 매달 지급받는 금액을 묻으면 true. 만기 총이자면 false"
+    )
+    docs: bool = Field(
+        description="우대조건·가입조건·대상·한도·해지 등 상품 설명 문서가 필요하면 true"
+    )
+    exclude_previous: bool = Field(
+        description="'다른 대안'·'그 외'·'말고 다른 거'처럼 직전에 보여준 상품을 빼고 찾으면 true"
+    )
+    count: int | None = Field(
+        ge=1, le=50, description="사용자가 정한 보여줄 상품 개수. 없으면 null"
+    )
+    # OpenAI strict 스키마는 $ref 필드에 description을 허용하지 않아 설명은 RouteFilters docstring에 둔다.
+    filters: RouteFilters
 
 
 class RouteOutput(StrictOutput):
-    # 라우팅 LLM 출력(chat·out_of_scope·easy·hard 중 하나).
+    # LLM이 작업과 조건을 함께 해석한다. 코드는 출력 검증과 실행만 한다.
     # 필드를 모두 필수로 둔다: 기본값이 있으면 제약 디코딩이 그 필드를 생략해 빈 출력이 된다(실측).
     ok: bool = Field(description="질문 유형을 판단할 수 있으면 true")
-    route: Route = Field(
-        description="chat=인사·잡담, out_of_scope=금융상품 공시와 무관, "
-        "easy=상품 하나의 사실 조회, hard=비교·순위·계산"
+    operation: Literal[
+        "chat",
+        "recall",
+        "search_documents",
+        "query_rates",
+        "calculate",
+        "refuse",
+    ] = Field(
+        description="지금 수행할 일: chat=인사, recall=이전 발화 자체를 기억해 답하기, search_documents=우대조건 등 설명 문서 검색, query_rates=금리 수치·순위 조회, calculate=이자·상환액 계산, refuse=지원 범위 밖"
     )
     reason: str = Field(description="판단 근거 한 문장")
+    comparison_scope: Literal["none", "market", "previous_products"] = Field(
+        description="market=종류·기간 등 조건을 유지하며 전체 후보에서 상품 찾기, previous_products=명시한 후보끼리 비교, none=비교 아님"
+    )
+    rank: int | None = Field(
+        ge=1,
+        description="순위 질문이면 1부터 시작하는 순위. '가장 높은'은 1, '두번째로 높은'은 2. 아니면 null. 같은 금리는 공동 순위",
+    )
+    follow_up: bool = Field(
+        description="이번 요청이 앞선 금융 조건을 이어받으면 true"
+    )
+    refusal: Literal["none", "future_rate", "unsupported"] = Field(
+        description="refuse일 때 이유: 미래 금리·수익 확정=future_rate, 지원하지 않는 상품·주제=unsupported. refuse가 아니면 none"
+    )
+    conditions: RouteConditions
+    clarify: str | None = Field(
+        description="필요한 조건이 없으면 지어내지 말고 사용자에게 물을 짧은 질문. 조건이 충분하면 null"
+    )
+
+    @property
+    def route(self) -> str:
+        return {
+            "chat": "chat",
+            "recall": "recall",
+            "search_documents": "easy",
+            "query_rates": "hard",
+            "calculate": "hard",
+            "refuse": "out_of_scope",
+        }[self.operation]
 
 
 # ---------------- 계획 (LLM Planner) ----------------
@@ -159,19 +266,22 @@ class ChatInput(BaseModel):
     history: list[Turn] = []
 
     def to_prompt(self) -> str:
-        """이전 대화와 질문을 마크다운으로 만든다."""
-        hist = (
-            "\n".join(f"{t.role}: {t.content}" for t in self.history)
-            or "(없음)"
+        asked = [t.content for t in self.history if t.role == "user"][::-1]
+        listed = "\n".join(
+            f"{i}. {'(직전) ' if i == 1 else ''}{q}"
+            for i, q in enumerate(asked, 1)
         )
-        return f"## 이전 대화\n{hist}\n\n## 사용자\n{self.question}"
+        return (
+            f"## 이전 사용자 질문 (이번 질문 제외, 최근 순)\n{listed or '(없음)'}\n\n"
+            f"## 이번 질문\n{self.question}"
+        )
 
 
 class ChatOutput(StrictOutput):
     # 잡담 응답 LLM 출력.
     ok: bool = Field(description="답할 수 있으면 true")
     reply: str = Field(
-        description="한국어 한두 문장. 금리 같은 수치는 쓰지 않는다"
+        description="한국어 답변. 회상은 대화 기록을 인용할 수 있다. 기록에 없는 금융 수치는 만들지 않는다"
     )
 
 
@@ -227,7 +337,8 @@ class ProductDoc(BaseModel):
         description="금리표(마크다운). 숫자는 써도 되지만 인용(citation)하지 않는다"
     )
     rates: list[RateRow] = Field(
-        default=[], description="상품 옵션별 검증 근거. 공시 평균금리는 제외한다"
+        default=[],
+        description="상품 옵션별 검증 근거. 공시 평균금리는 제외한다",
     )
     descriptions: list[Description] = []
     data_flags: list[str] = Field(

@@ -153,6 +153,8 @@ class Catalog:
         banks: list[str] | None = None,
         filters: dict | None = None,
         limit: int = 5,
+        rank: int | None = None,
+        exclude_ids: list[str] | None = None,
     ) -> list[dict]:
         """상품별 최적 옵션 1행씩 정렬해 반환. 예·적금은 높은 금리, 대출은 낮은 금리가 앞. 동률은 모두 포함."""
         if kind not in METRICS:
@@ -167,6 +169,8 @@ class Catalog:
             raise ValueError("신용대출 금리 조회에는 신용점수가 필요합니다")
         if limit < 1:
             raise ValueError(f"limit은 1 이상이어야 합니다: {limit}")
+        if rank is not None and rank < 1:
+            raise ValueError("rank는 1 이상이어야 합니다")
         if credit_score is not None and kind != "credit":
             raise ValueError(
                 f"credit_score는 신용대출에만 적용됩니다({kind}에는 넣지 마세요)"
@@ -197,6 +201,7 @@ class Catalog:
                 or (group and p.group != group)
                 or (banks and p.bank not in banks)
                 or (product_ids and p.id not in product_ids)
+                or (exclude_ids and p.id in exclude_ids)
             ):
                 continue
             if (
@@ -249,6 +254,13 @@ class Catalog:
                 r["product_id"],
             )
         )
+        if rank is not None:
+            levels = list(dict.fromkeys(r["value"] for r in rows))
+            return (
+                [r for r in rows if r["value"] == levels[rank - 1]]
+                if rank <= len(levels)
+                else []
+            )
         if len(rows) > limit:  # 경계 동률은 잘라내지 않는다
             cut = rows[limit - 1]["value"]
             rows = rows[:limit] + [r for r in rows[limit:] if r["value"] == cut]

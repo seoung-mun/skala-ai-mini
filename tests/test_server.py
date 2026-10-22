@@ -90,7 +90,12 @@ def make_app(llm, version="v2", tmp=":memory:"):
 
 def test_stream_v2_easy_follows_contract_and_remembers_thread(tmp_path):
     """v2 스트림이 계약을 지키고 같은 thread의 대화를 기억한다."""
-    ok = {"ok": True, "reply": "급여 이체 시 연 0.5%p예요", "citations": [], "missing": ""}
+    ok = {
+        "ok": True,
+        "reply": "급여 이체 시 연 0.5%p예요",
+        "citations": [],
+        "missing": "",
+    }
     rewrite = {
         "follow_up": True,
         "question": "가나적금 가입 방법은?",
@@ -134,12 +139,8 @@ def test_stream_v2_easy_follows_contract_and_remembers_thread(tmp_path):
         assert (
             evs2[0]["route"] == "easy" and evs2[-1]["products"][0]["id"] == A
         )  # 직전 상품 이어받음
-        assert evs2[0]["rewrite"] == {
-            "original": "그거 가입 방법은?",
-            "question": "가나적금 가입 방법은?",
-            "applied": True,
-            "reason": "직전 상품",
-        }
+        assert evs2[0]["conditions"]["product_ids"] == [A]
+        assert "rewrite" not in evs2[0]
 
 
 def test_post_chat_returns_final_body_and_v1_toggle():
@@ -257,7 +258,9 @@ def test_reset_waits_for_running_turn_so_old_context_cannot_be_saved_again():
 
     entered, release = Event(), Event()
     with (
-        TestClient(make_app(FakeLLM())) as client,
+        TestClient(
+            make_app(FakeLLM({"ok": True, "reply": "예전 질문"}))
+        ) as client,
         ThreadPoolExecutor(max_workers=2) as pool,
     ):
         rt = client.app.state.rt

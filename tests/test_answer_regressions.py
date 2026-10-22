@@ -4,6 +4,7 @@ import asyncio
 from pathlib import Path
 
 import pytest
+from legacy_rules import extract
 from test_graph import FakeLLM, FakeRetriever, ans
 
 from finagent.catalog import Catalog
@@ -12,7 +13,6 @@ from finagent.graph.build import build_graph, run_v2
 from finagent.graph.nodes import route_node
 from finagent.parser import parse_all
 from finagent.schemas import ToolResult
-from finagent.slots import extract
 from finagent.validate import check_answer
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -43,7 +43,14 @@ class QueryMCP:
 
 def run(catalog, query, *replies, prev=None):
     """LLM 답만 고정하고 실제 그래프로 질문을 실행한다. (final, state, llm)을 돌려준다."""
-    llm = FakeLLM(*map(ans, replies))
+    llm = FakeLLM(
+        *(
+            [{"ok": True, "route": "easy", "reason": "후속 금리 조회"}]
+            if prev
+            else []
+        ),
+        *map(ans, replies),
+    )
     deps = Deps(
         llm,
         QueryMCP(catalog),
@@ -169,7 +176,7 @@ def test_followup_keeps_metric_filters_and_updates_term(catalog):
         "우리SUPER주거래적금 정액적립식 12개월 기본금리 얼마야?", catalog
     ).to_dict()
     deps = Deps(
-        FakeLLM(),
+        FakeLLM({"ok": True, "route": "easy", "reason": "후속 금리 조회"}),
         QueryMCP(catalog),
         FakeRetriever([]),
         catalog,
@@ -231,7 +238,9 @@ def test_condition_matching_does_not_override_explicit_rate_or_guess_ambiguous_c
     assert condition_rate("급여이체하면 기본금리는?", [doc]) is None
     assert condition_rate("급여이체하면 최고금리는?", [doc]) is None
     # 두 조건이 똑같이 겹치면 어느 쪽인지 정하지 않는다.
-    assert condition_rate("급여이체랑 공과금 자동이체 우대 얼마?", [doc]) is None
+    assert (
+        condition_rate("급여이체랑 공과금 자동이체 우대 얼마?", [doc]) is None
+    )
     doc.descriptions = [
         Description(section="우대조건", text="급여 이체 0.5%p 또는 0.7%p")
     ]

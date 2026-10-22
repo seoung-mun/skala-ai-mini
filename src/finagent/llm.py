@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
+from contextvars import ContextVar
 from typing import TypeVar
 
 import httpx
@@ -19,6 +20,26 @@ from pydantic import BaseModel, ValidationError
 from .schemas import LLMOutputError
 
 T = TypeVar("T", bound=BaseModel)
+SESSION_HISTORY = ContextVar("finagent_session_history", default=())
+
+
+@contextmanager
+def session_context(history):
+    token = SESSION_HISTORY.set(
+        tuple((m["role"], m["content"]) for m in history)
+    )
+    try:
+        yield
+    finally:
+        SESSION_HISTORY.reset(token)
+
+
+def session_messages():
+    return list(SESSION_HISTORY.get())
+
+
+def messages_for(system: str, prompt: str):
+    return [("system", system), *session_messages(), ("human", prompt)]
 
 
 def parse_output(text: str, out: type[T]) -> T:
@@ -176,7 +197,7 @@ class OllamaLLM:
         self, system: str, user: str, schema: dict | None = None
     ) -> tuple[str, dict]:
         """일반 호출. schema가 있으면 그 JSON Schema로 출력을 강제한다. (텍스트, 사용량)을 돌려준다."""
-        messages = [("system", system), ("human", user)]
+        messages = messages_for(system, user)
         if schema is None:
             message = _invoke(
                 self.client, messages, usage=self.usage, stream=False
@@ -195,7 +216,7 @@ class OllamaLLM:
         parsed, _, usage = _structured(
             self.client,
             out,
-            [("system", system), ("human", payload.to_prompt())],
+            messages_for(system, payload.to_prompt()),
             usage=self.usage,
         )
         return parsed, usage
@@ -276,7 +297,7 @@ class OpenAILLM:
         schema_name: str = "Output",
     ) -> tuple[str, dict]:
         """일반 호출. schema가 있으면 strict JSON Schema로 출력을 강제한다. (텍스트, 사용량)을 돌려준다."""
-        messages = [("system", system), ("human", user)]
+        messages = messages_for(system, user)
         if schema is None:
             message = _invoke(self.client, messages, usage=self.usage)
             usage = self.usage(message)
@@ -297,7 +318,7 @@ class OpenAILLM:
         parsed, _, usage = _structured(
             self.client,
             out,
-            [("system", system), ("human", payload.to_prompt())],
+            messages_for(system, payload.to_prompt()),
             usage=self.usage,
             strict=True,
         )

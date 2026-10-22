@@ -136,10 +136,6 @@ def check_membership_claims(
             for _, v in sources[pid]
             if len(v) >= 4
         } - {v for _, v in allowed}
-        if any(v in part for v in borrowed):
-            return [
-                "다른 상품의 가입 정보를 이 상품에 썼습니다. 상품별 공시 가입 정보를 그대로 쓰세요."
-            ]
         for index, value in enumerate(
             sorted({v for _, v in allowed}, key=lambda v: (-len(v), v))
         ):
@@ -179,6 +175,10 @@ def check_membership_claims(
                     "",
                     part,
                 )
+        if any(v in part for v in borrowed):
+            return [
+                "다른 상품의 가입 정보를 이 상품에 썼습니다. 상품별 공시 가입 정보를 그대로 쓰세요."
+            ]
         restricted = any(
             docs[pid].info.get("가입 제한") not in (None, "", "제한없음")
             for pid in pids
@@ -206,8 +206,13 @@ def check_requirements(inp, reply: str, notes: list | None = None) -> list[str]:
     가입 정보처럼 원문을 의역한 항목은 같은 뜻인지 판정할 수 없어 notes에만 남긴다."""
     text = squash(reply.replace("**", "").replace("`", ""))
     names = {squash(f.product) for f in inp.required_facts if f.product}
-    positions = sorted(
-        (text.find(name), name) for name in names if name in text
+    pattern = "|".join(
+        re.escape(n) for n in sorted(names, key=len, reverse=True)
+    )
+    positions = (
+        [(m.start(), m[0]) for m in re.finditer(pattern, text)]
+        if pattern
+        else []
     )
     blocks = {}
     for i, (start, name) in enumerate(positions):
@@ -329,4 +334,21 @@ def source_citations(inp, citations: list[dict]) -> list[dict]:
                     if item not in out:
                         out.append(item)
                     break
+        for source in doc.descriptions:
+            if source.section in inp.question and source.text.strip():
+                item = {
+                    "product_id": doc.product_id,
+                    "section": source.section,
+                    "quote": source.text,
+                }
+                if item not in out:
+                    out.append(item)
+        if doc.product_id in rows and doc.rate_table.strip():
+            out.append(
+                {
+                    "product_id": doc.product_id,
+                    "section": "금리표",
+                    "quote": doc.rate_table,
+                }
+            )
     return out

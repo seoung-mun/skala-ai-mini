@@ -1,4 +1,4 @@
-"""질문에서 슬롯과 라우팅 신호를 규칙으로 뽑는다. LLM 없이 재현 가능해야 라우팅 정확도를 측정할 수 있다."""
+"""LLM 조건을 실행 상태로 검증·변환한다. 규칙 추출기는 eval/legacy_rules.py(테스트·과거 평가 전용)에 있다."""
 
 from __future__ import annotations
 
@@ -6,48 +6,12 @@ import re
 from dataclasses import asdict, dataclass, field
 
 from .amounts import money_values
-from .catalog import BANK_ALIASES, CREDIT_TYPE, Catalog, squash
+from .catalog import BANK_ALIASES, Catalog, core_name, squash
 
-KIND_RE = [
-    ("credit", r"신용대출|마이너스|신용점수|카드론"),
-    ("rent", r"전세"),
-    ("mortgage", r"주담대|주택담보|담보대출|아파트\s*담보|집\s*담보"),
-    ("saving", r"적금"),
-    ("deposit", r"예금"),
-]
-OUT_OF_SCOPE_RE = (
-    r"주식|주가|코인|비트코인|이더리움|보험|날씨|환율|펀드|로또|부동산\s*시세"
-)
-FINANCE_RE = r"금리|이자|우대|대출|예금|적금|은행|뱅크|가입|상품|수수료|한도|상환|신용|저축|빌리|빌려|갚"
-COMPARE_RE = r"제일|가장|비교|중에|중\s|순서|순위|추천|어디|어느|뭐가\s*나아|더\s*높|더\s*낮|\d+\s*개\s*(보여|알려)"
-# 최대 우대 폭(%p)을 묻는 질문 — 최고금리(%)와 구분. "자동이체하면 몇 %p?"처럼 조건 하나를 묻는 질문은 제외
-SPREAD_RE = r"우대\s*(금리\s*)?폭|(최고|최대).*(%\s*p|퍼센트\s*포인트)"
-# "저축은행은 제외하고", "은행 말고" 같은 금융권 제외 표현
-EXCLUDE_RE = r"\s*(?:은|는|을|를|이|가|도)?\s*(?:제외|빼고|말고|아닌)"
-# 미래 시점 금리를 확정·예측해 달라는 질문. 공시는 현재 값만 있어 답할 수 없다.
-FUTURE_RE = (
-    r"(?:내년|다음\s*(?:달|해|분기)|\d+\s*(?:개월|년)\s*(?:뒤|후)|앞으로|미래|이맘때)"
-    r".*(?:금리|이율).*(?:확정|정확히|예측|오를|오르|내릴|떨어|될지|바뀔)"
-)
 # "기본금리나 전체 우대 폭은 빼고"처럼 제외한 항목은 묻는 금리 종류로 읽지 않는다.
 EXCLUDED_ITEM_RE = (
     r"(?:[^\s.?!,]+\s+){0,3}[^\s.?!,]+?(?:은|는|을|를)\s*(?:빼고|제외하고|말고)"
 )
-GOAL_RE = r"모으려면|모으고\s*싶|모을\s*수|만들려면|목표|얼마까지\s*빌|최대\s*얼마.*빌|갚을\s*수\s*있"  # 역산 계산
-CALC_RE = r"이자\s*(얼마|는)|얼마나\s*(돼|받|붙)|상환액|한\s*달에\s*얼마|월\s*얼마|갚으면|빌리면|빌려서|넣으면|세전이자|만기에\s*얼마"
-
-
-def asks_recall(q: str) -> bool:
-    """자신의 이전 질문 원문을 묻는 명확한 회상 요청만 잡는다."""
-    return bool(
-        re.search(r"방금|직전|이전|아까|앞서|마지막|내가|제가|내 |제 ", q)
-        and re.search(
-            r"(?:뭐|무엇|어떤|무슨).*(?:질문했|물었|물어봤|요청했)|"
-            r"(?:질문|요청)(?:\s*(?:내용|원문|을|은|이))?\s*"
-            r"(?:뭐(?:야|였|지)|무엇(?:이야|이었|이지)|(?:어떤|무슨).*였|다시|알려|기억|말해|반복)",
-            q,
-        )
-    )
 
 
 def won_amounts(text: str) -> list[int]:
@@ -75,25 +39,9 @@ def months(text: str) -> int | None:
     return int(years or 0) * 12 + int(extra or single or 0) + (6 if half else 0)
 
 
-def _group(q: str) -> str | None:
-    """금융권(bank·savingsbank)을 고른다. 제외 표현이 붙은 금융권은 고르지 않는다."""
-    savings = re.search(r"저축은행", q)
-    savings_out = bool(re.search("저축은행" + EXCLUDE_RE, q))
-    bank_out = bool(re.search(r"(?<!저축)은행" + EXCLUDE_RE, q))
-    if savings and not savings_out:
-        return "savingsbank"
-    if savings_out and bank_out:
-        raise ValueError(
-            "은행과 저축은행을 모두 제외하면 조회할 금융권이 없습니다"
-        )
-    if savings_out or re.search(r"(^|\s)은행", q):
-        return None if bank_out else "bank"
-    return None
-
-
 @dataclass
 class Slots:
-    """질문에서 규칙으로 뽑은 조건(상품 종류·금액·기간·점수·필터)과 라우팅 신호."""
+    """조회·계산에 사용할 검증된 조건."""
 
     kinds: list[str] = field(default_factory=list)
     group: str | None = None
@@ -107,6 +55,12 @@ class Slots:
     metric: str | None = None
     filters: dict = field(default_factory=dict)
     compare: bool = False
+    rank: int | None = None
+    exclude_ids: list[str] = field(default_factory=list)
+    repayment: str | None = None
+    monthly_payout: bool = False
+    docs: bool = False
+    count: int | None = None
     calc: bool = False
     goal: bool = False
     question: str = ""  # 검증된 독립 질문을 보존해 연속 후속 질문에서도 계산 의도를 유지한다.
@@ -116,103 +70,115 @@ class Slots:
         return asdict(self)
 
 
-def extract(q: str, catalog: Catalog) -> Slots:
-    """질문에서 Slots를 규칙으로 뽑는다(LLM 없음)."""
-    kinds = [k for k, pat in KIND_RE if re.search(pat, q)]
-    prods = catalog.find_products(q)
-    for p in prods:
-        if p.kind not in kinds:
-            kinds.append(p.kind)
-    amounts = won_amounts(q)
-    score = next(
-        (
-            int(s)
-            for s in re.findall(r"(\d{3,4})\s*점", q)
-            if 0 <= int(s) <= 1000
-        ),
-        None,
+def from_route(
+    decision, catalog: Catalog, question: str, history: list
+) -> Slots:
+    """LLM이 고른 조건만 변환한다. 질문의 단어로 은행·상품·경로를 다시 고르지 않는다."""
+    c = decision.conditions
+    canonical = {squash(b.replace("주식회사", "")): b for b in catalog.banks}
+    canonical.update(
+        {squash(a): b for a, b in BANK_ALIASES.items() if b in catalog.banks}
     )
-    rate = re.search(r"(\d+(?:\.\d+)?)\s*%(?!\s*[pP])", q)
-    group = _group(q)
-    metric = None
-    asked = re.sub(EXCLUDED_ITEM_RE, " ", q)
-    if any(k in ("saving", "deposit") for k in kinds):
-        metric = (
-            "spread"
-            if re.search(SPREAD_RE, asked)
-            else (
-                "rate"
-                if "기본" in asked
-                else ("rate_max" if re.search(r"최고|우대", asked) else None)
+    banks = []
+    for name in c.banks:
+        bank = canonical.get(squash(name.replace("주식회사", "")))
+        if bank is None:
+            raise ValueError(f"공시에 없는 금융회사: {name}")
+        if bank not in banks:
+            banks.append(bank)
+
+    def full_name(p) -> str:
+        return squash(p.bank.replace("주식회사", "") + p.name)
+
+    wanted = {squash(name.replace("주식회사", "")) for name in c.products}
+    ids = [
+        p.id
+        for p in catalog.products
+        if (
+            full_name(p)
+            in wanted  # '조은저축은행 정기예금(서울본점)'처럼 은행명까지 쓴 이름
+            or (
+                any(
+                    squash(name) == squash(p.name)
+                    or core_name(name) == core_name(p.name)
+                    for name in c.products
+                )
+                and (banks or core_name(p.name) not in catalog.generic)
             )
         )
-    elif re.search(r"최고\s*금리|최대\s*금리", asked):
-        metric = "max"
-    elif re.search(r"최저\s*금리", asked):
-        metric = "min"
-    f = {}
-    for word, key, val in (
-        ("아파트외", "mrtg_type_nm", "아파트외"),
-        ("분할", "rpay_type_nm", "분할상환방식"),
-        ("만기일시", "rpay_type_nm", "만기일시상환방식"),
-        ("고정", "lend_rate_type_nm", "고정금리"),
-        ("변동", "lend_rate_type_nm", "변동금리"),
-        ("정액", "rsrv_type_nm", "정액적립식"),
-        ("자유적립", "rsrv_type_nm", "자유적립식"),
-    ):
-        if word in q:
-            f.setdefault(key, val)
-    if "아파트" in q and "mrtg_type_nm" not in f:
-        f["mrtg_type_nm"] = "아파트"
-    if "credit" in kinds:
-        f["crdt_prdt_type"] = next(
-            (v for w, v in CREDIT_TYPE.items() if w in q and w != "일반"), "1"
+        and (not banks or p.bank in banks)
+        and (not c.kinds or p.kind in c.kinds)
+        and (c.group is None or p.group == c.group)
+        and (
+            p.kind != "credit"
+            or c.filters.crdt_prdt_type is None
+            or p.base["crdt_prdt_type"] == c.filters.crdt_prdt_type
         )
-        prods = [
-            p
-            for p in prods
-            if p.kind != "credit"
-            or p.base["crdt_prdt_type"] == f["crdt_prdt_type"]
+    ]
+    if ids:
+        # '그 상품이랑 카카오뱅크 비교'처럼 상품과 금융회사를 함께 지정하면 상품이 없는 금융회사도 후보에 넣는다.
+        covered = {catalog.by_id[i].bank for i in ids}
+        ids += [
+            p.id
+            for p in catalog.products
+            if p.bank in banks
+            and p.bank not in covered
+            and (not c.kinds or p.kind in c.kinds)
         ]
-    term = months(q)
-    # 'SC제일은행'의 '제일'처럼 이름 속 단어가 비교어로 잡히지 않게 이름을 지우고 신호를 찾는다.
-    cue = q
-    for name in (
-        [p.name for p in prods] + catalog.find_banks(q) + list(BANK_ALIASES)
-    ):
-        cue = cue.replace(name, " ")
-    distinct = {squash(p.name) for p in prods}
-    return Slots(
-        question=q,
-        kinds=kinds,
-        group=group,
-        amount_won=amounts[0] if amounts else None,
-        monthly=bool(re.search(r"(월|매달|매월)\s*\d", q)),
-        term_months=term,
-        credit_score=score,
-        rate_pct=float(rate.group(1)) if rate else None,
-        banks=catalog.find_banks(q),
-        product_ids=[p.id for p in prods],
-        metric=metric,
-        filters=f,
-        compare=bool(re.search(COMPARE_RE, cue)) or len(distinct) >= 2,
-        calc=bool(re.search(CALC_RE, cue)) and bool(amounts),
-        goal=bool(re.search(GOAL_RE, cue)) and bool(amounts),
+    s = Slots(
+        **c.model_dump(
+            exclude={
+                "products",
+                "banks",
+                "filters",
+                "calculation",
+                "exclude_previous",
+            }
+        ),
+        banks=banks,
+        product_ids=ids,
+        filters=c.filters.model_dump(exclude_none=True),
+        calc=c.calculation != "none",
+        goal=c.calculation == "goal",
+        compare=decision.rank is not None
+        or decision.comparison_scope != "none",
+        rank=decision.rank,
+        question=question,
     )
+    if s.amount_won is not None and s.amount_won < 1_000:
+        raise ValueError(
+            f"계산 금액 {s.amount_won}원은 너무 작습니다. 단위를 생략한 저축 금액은 만원 단위입니다"
+        )
+    if s.amount_won is not None and not decision.clarify:
+        # 의도는 LLM이 정하고, 계산 금액이 사용자가 쓴 숫자에서 나왔는지만 본다('월 50'처럼 단위를 생략해도 허용).
+        said = "\n".join(
+            [m["content"] for m in history if m["role"] == "user"] + [question]
+        )
+        numbers = {
+            int(n.replace(",", ""))
+            for n in re.findall(r"\d[\d,]*", said)
+            if n.replace(",", "").isdigit()
+        }
+        units = (1, 1_000, 10_000, 1_000_000, 10_000_000, 100_000_000)
+        if s.amount_won not in set(won_amounts(said)) | {
+            n * u for n in numbers for u in units
+        }:
+            raise ValueError("계산 금액이 사용자 발화에 없습니다")
+    if s.calc and s.amount_won is None and won_amounts(question):
+        raise ValueError("사용자가 지정한 계산 금액이 누락됐습니다")
+    if s.rate_pct is not None:
+        from .validate import values_of
 
-
-def route_rules(q: str, s: Slots) -> tuple[str | None, str]:
-    """(route, 근거). 규칙으로 못 정하면 (None, ...) -> LLM 분류로 넘긴다."""
-    if re.search(OUT_OF_SCOPE_RE, q):
-        return "out_of_scope", "금융상품 공시 범위 밖 주제"
-    if re.search(FUTURE_RE, q):
-        return "out_of_scope", "미래 시점 금리 확정 요청"
-    if not (s.kinds or s.product_ids or re.search(FINANCE_RE, q)):
-        return "chat", "금융상품 관련 표현 없음"
-    if s.compare:
-        return "hard", "비교·집계 질문"
-    if s.calc or s.goal or (s.amount_won and s.term_months):
-        return "hard", "금액·기간이 있는 계산 질문"
-    if s.product_ids or s.kinds:
-        return "easy", "단일 상품·사실 조회"
-    return None, "규칙으로 판단 불가"
+        user_text = "\n".join(
+            [m["content"] for m in history if m["role"] == "user"] + [question]
+        )
+        if s.rate_pct not in values_of(user_text, "pct"):
+            raise ValueError(
+                "계산 연이율이 사용자 발화에 없습니다. 상품 금리는 도구로 조회해야 합니다"
+            )
+    if s.amount_won is not None and {"deposit", "saving"} <= set(s.kinds):
+        # 목돈은 예금, 매달 납입은 적금에만 넣을 수 있다.
+        s.kinds = [
+            k for k in s.kinds if k != ("deposit" if s.monthly else "saving")
+        ]
+    return s

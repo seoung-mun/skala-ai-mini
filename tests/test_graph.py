@@ -146,6 +146,48 @@ class FakeRetriever:
         ]
 
 
+def fixed_route(q, s):
+    """도구 테스트만 위한 고정 라우팅. 제품 런타임에는 규칙 라우터가 없다."""
+    import re
+
+    from legacy_rules import FINANCE_RE, FUTURE_RE, OUT_OF_SCOPE_RE
+
+    if re.search(OUT_OF_SCOPE_RE, q) or re.search(FUTURE_RE, q):
+        return "out_of_scope", "고정 응답"
+    if not (s.kinds or s.product_ids or re.search(FINANCE_RE, q)):
+        return "chat", "고정 응답"
+    if s.compare or s.calc or s.goal or (s.amount_won and s.term_months):
+        return "hard", "고정 응답"
+    return "easy", "고정 응답"
+
+
+def fake_conditions(q):
+    """가짜 라우터가 실모델 대신 채우는 실행 조건(제품 런타임은 LLM 출력만 쓴다)."""
+    import re
+
+    m = re.search(r"(\d+)\s*개(?!월)", q)
+    return {
+        "repayment": "bullet"
+        if "만기일시" in q
+        else "equal_payment"
+        if "원리금균등" in q
+        else "equal_principal"
+        if "원금균등" in q
+        else None,
+        "monthly_payout": bool(
+            re.search(r"(?:매월|매달|월별)\s*(?:받[는을]\s*)?이자", q)
+        ),
+        "docs": bool(
+            re.search(
+                r"우대|조건|가입|대상|수수료|연체|한도|해지|유의|방법|언제|누가",
+                q,
+            )
+        ),
+        "count": int(m.group(1)) if m else None,
+        "exclude_previous": False,
+    }
+
+
 class FakeLLM:
     """structured 응답을 순서대로 돌려준다(dict -> 출력 모델로 검증). 받은 입력 모델도 기록한다."""
 
@@ -155,6 +197,151 @@ class FakeLLM:
 
     def structured(self, system, payload, out):
         """입력을 기록하고 다음 고정 응답을 출력 모델로 검증해 돌려준다."""
+        import re
+
+        from legacy_rules import FUTURE_RE, extract
+
+        from finagent.schemas import RouteOutput
+
+        if out is RouteOutput:
+            # 도구 테스트용 고정 응답이다. 실모델 분류 품질은 별도 실제 평가에서 측정한다.
+            from pathlib import Path
+
+            from finagent.parser import parse_all
+            from finagent.schemas import RouteFilters
+
+            if not hasattr(FakeLLM, "catalog"):
+                FakeLLM.catalog = Catalog(
+                    CAT.products
+                    + parse_all(
+                        Path(__file__).resolve().parents[1] / "data/raw"
+                    )
+                )
+            q = payload.question
+            previous = payload.previous_conditions or {}
+            current = extract(q, FakeLLM.catalog)
+            conditions = current.to_dict()
+            rewrite = None
+            if (
+                self.replies
+                and "follow_up" in self.replies[0]
+                and "operation" not in self.replies[0]
+            ):
+                rewrite = self.replies.pop(0)
+                current = extract(rewrite["question"], FakeLLM.catalog)
+                conditions = current.to_dict()
+            follow = bool(previous) and (
+                rewrite is not None
+                or q.startswith(("그거", "그럼", "그 상품", "나은행"))
+            )
+            if follow:
+                changed = bool(
+                    conditions["banks"]
+                    and conditions["banks"] != previous.get("banks")
+                )
+                for key in (
+                    "kinds",
+                    "group",
+                    "term_months",
+                    "credit_score",
+                    "metric",
+                ):
+                    if conditions[key] in (None, []):
+                        conditions[key] = previous.get(key)
+                conditions["filters"] = {
+                    **previous.get("filters", {}),
+                    **conditions["filters"],
+                }
+                if not conditions["product_ids"] and not changed:
+                    conditions["products"] = previous.get("products", [])
+                if previous.get("amount_won"):
+                    conditions["amount_won"] = (
+                        conditions["amount_won"] or previous["amount_won"]
+                    )
+                    conditions["monthly"] = conditions[
+                        "monthly"
+                    ] or previous.get("monthly", False)
+                    conditions["calc"] = True
+            recall = q in {
+                "내가 방금 뭐라고 질문했어?",
+                "내 이전 질문 다시 알려줘",
+                "내가 처음 물어본 상품 이름이 뭐였지?",
+                "내가 아까 알려준 신용점수가 몇 점이었지?",
+            }
+            route = fixed_route(q, current)[0] or "easy"
+            if follow and (conditions.get("calc") or conditions.get("compare")):
+                route = "hard"
+            decision = {
+                "ok": True,
+                "route": "recall" if recall else route,
+                "reason": "테스트용 고정 분류",
+            }
+            if self.replies and (
+                "route" in self.replies[0] or "operation" in self.replies[0]
+            ):
+                decision = {**self.replies.pop(0)}
+            if "route" in decision:
+                decision["operation"] = {
+                    "chat": "chat",
+                    "recall": "recall",
+                    "easy": "search_documents",
+                    "hard": "calculate"
+                    if conditions.get("calc") and not conditions.get("compare")
+                    else "query_rates",
+                    "out_of_scope": "refuse",
+                }[decision.pop("route")]
+            decision.pop("source", None)
+            decision.setdefault(
+                "comparison_scope",
+                "market" if conditions.get("compare") else "none",
+            )
+            decision.setdefault("rank", None)
+            decision.setdefault("follow_up", follow)
+            decision.setdefault("clarify", None)
+            products = conditions.pop("products", None)
+            ids = conditions.pop("product_ids", [])
+            conditions["products"] = (
+                products
+                if products is not None
+                else [FakeLLM.catalog.by_id[i].name for i in ids]
+            )
+            goal, calc = (
+                conditions.pop("goal", False),
+                conditions.pop("calc", False),
+            )
+            conditions["calculation"] = (
+                "goal" if goal else "forward" if calc else "none"
+            )
+            for key in ("rank", "compare", "question", "exclude_ids"):
+                conditions.pop(key, None)
+            conditions["filters"] = {
+                key: conditions["filters"].get(key)
+                for key in RouteFilters.model_fields
+            }
+            if conditions["metric"] == "max" and any(
+                k in ("saving", "deposit") for k in conditions["kinds"]
+            ):
+                conditions["metric"] = "rate_max"
+            conditions.update(fake_conditions(q))
+            if conditions["metric"] == "rate_max" and not re.search(
+                r"최고|최대\s*금리", q
+            ):
+                conditions["metric"] = (
+                    None  # 우대 설명 질문은 수치 조회가 아니다
+                )
+            refuse = decision["operation"] == "refuse"
+            decision.setdefault(
+                "refusal",
+                ("future_rate" if re.search(FUTURE_RE, q) else "unsupported")
+                if refuse
+                else "none",
+            )
+            decision.setdefault("conditions", conditions)
+            return out.model_validate(decision), {
+                "prompt_tokens": 1,
+                "completion_tokens": 1,
+                "usd": 0.0,
+            }
         self.inputs.append(payload)
         return out.model_validate(self.replies.pop(0)), {
             "prompt_tokens": 10,
@@ -178,6 +365,49 @@ def ans(reply, ok=True, cites=(), missing=""):
         "reply": reply,
         "citations": list(cites),
         "missing": missing,
+    }
+
+
+def route_reply(
+    operation="search_documents",
+    *,
+    scope="none",
+    rank=None,
+    follow_up=False,
+    clarify=None,
+    **conditions,
+):
+    from finagent.schemas import RouteFilters
+
+    return {
+        "ok": True,
+        "operation": operation,
+        "reason": "고정 LLM 응답",
+        "comparison_scope": scope,
+        "rank": rank,
+        "follow_up": follow_up,
+        "refusal": "none",
+        "clarify": clarify,
+        "conditions": {
+            "kinds": [],
+            "group": None,
+            "banks": [],
+            "products": [],
+            "metric": None,
+            "amount_won": None,
+            "monthly": False,
+            "term_months": None,
+            "credit_score": None,
+            "rate_pct": None,
+            "calculation": "none",
+            "repayment": None,
+            "monthly_payout": False,
+            "docs": False,
+            "count": None,
+            "exclude_previous": False,
+            "filters": {k: None for k in RouteFilters.model_fields},
+            **conditions,
+        },
     }
 
 
@@ -210,7 +440,7 @@ def test_chat_route_answers_without_retrieval():
         and final["reply"] == "안녕하세요!"
         and types(st) == ["RouteDecided"]
     )
-    assert final["metadata"]["llm_calls"] == 1 and final["warnings"][
+    assert final["metadata"]["llm_calls"] == 2 and final["warnings"][
         0
     ].startswith("2026년 9월")
 
@@ -218,7 +448,7 @@ def test_chat_route_answers_without_retrieval():
 def test_out_of_scope_refuses_without_llm():
     """범위 밖 질문은 LLM 없이 거절한다."""
     final, st = run("테슬라 주식 어때?", FakeLLM())
-    assert final["route"] == "out_of_scope" and st["llm_calls"] == 0
+    assert final["route"] == "out_of_scope" and st["llm_calls"] == 1
 
 
 def test_easy_path_uses_rag_subgraph_and_structured_input():
@@ -265,9 +495,9 @@ def test_bad_citation_is_dropped_with_warning_not_rejected():
         ],
     )
     final, st = run("가나적금 최고금리 얼마야?", FakeLLM(bad))
-    assert st["verified"] and [c["quote"] for c in final["citations"]] == [
-        "급여 이체 시 연 0.5%p"
-    ]
+    assert st["verified"] and [
+        c["quote"] for c in final["citations"] if c["section"] != "금리표"
+    ] == ["급여 이체 시 연 0.5%p"]
     assert any("인용 1건은 제외" in w for w in final["warnings"])
 
 
@@ -290,7 +520,7 @@ def test_insufficient_evidence_stops_without_rewrite():
         FakeLLM(ans("", ok=False, missing="중도해지 조건이 공시에 없어요")),
     )
     assert (
-        st["llm_calls"] == 1
+        st["llm_calls"] == 2
         and "중도해지 조건이 공시에 없어요" in final["reply"]
     )
 
@@ -384,7 +614,7 @@ def test_hard_fallback_table_when_validation_keeps_failing():
 def test_credit_without_score_asks_instead_of_guessing():
     """신용점수 없는 신용대출 비교는 추측하지 않고 점수를 묻는다."""
     final, st = run("신용대출 금리 제일 낮은 곳 어디야?", FakeLLM())
-    assert "신용점수" in final["reply"] and st["llm_calls"] == 0
+    assert "신용점수" in final["reply"] and st["llm_calls"] == 1
 
 
 def test_tool_failure_is_reported_not_hidden():
@@ -410,7 +640,9 @@ def test_tool_failure_is_reported_not_hidden():
 def test_follow_up_inherits_previous_product():
     """후속 질문은 직전 상품을 이어받는다."""
     prev = {"kinds": ["saving"], "product_ids": [A], "banks": [], "group": None}
-    final, st = run("그거 우대조건은?", FakeLLM(ans("급여 이체 시 연 0.5%p예요")), prev=prev)
+    final, st = run(
+        "그거 우대조건은?", FakeLLM(ans("급여 이체 시 연 0.5%p예요")), prev=prev
+    )
     assert final["route"] == "easy" and st["slots"]["product_ids"] == [A]
 
 
@@ -572,7 +804,7 @@ def test_llm_planner_decomposes_and_subagents_run():
     assert (
         final["calculations"][0]["result"] == 104000
         and st["verified"]
-        and st["llm_calls"] == 2
+        and st["llm_calls"] == 3
     )
     assert (
         llm.inputs[0].slots["amount_won"] == 500000
@@ -626,7 +858,7 @@ def test_rule_planner_is_default_and_calls_no_llm_for_plan():
         "은행 적금 중에 12개월 기본금리 제일 높은 거 뭐야?",
         FakeLLM(ans("다라적금이 3.2%로 가장 높아요")),
     )
-    assert plan_event(st)["planner"] == "rule" and st["llm_calls"] == 1
+    assert plan_event(st)["planner"] == "rule" and st["llm_calls"] == 2
 
 
 # ---------------- 도구 호출 검색 에이전트 (RAG_AGENT=react) ----------------
@@ -715,7 +947,7 @@ def test_react_rag_reads_resource_then_selects_evidence():
     )
     assert ("read_resource", f"product://{A}") in mcp.calls
     assert (
-        st["llm_calls"] == 3 and st["verified"]
+        st["llm_calls"] == 4 and st["verified"]
     )  # 검색 에이전트 2회 + 답변 1회가 부모 집계에 합쳐진다
 
 
@@ -773,7 +1005,7 @@ def test_react_rag_skips_llm_for_named_product():
         FakeAgentLLM(),
         FakeLLM(ans("가나적금 급여 이체 우대는 연 0.5%p예요")),
     )
-    assert st["llm_calls"] == 1 and st["results"][0]["doc_ids"] == [A]
+    assert st["llm_calls"] == 2 and st["results"][0]["doc_ids"] == [A]
 
 
 def test_query_elapsed_includes_mcp_wait(monkeypatch):

@@ -250,6 +250,8 @@ async def run(out, system):
 
     mcp = None
     if system == "current":
+        from legacy_rules import extract
+
         from finagent.catalog import Catalog
         from finagent.deps import Deps
         from finagent.graph.build import build_graph, run_v2
@@ -260,7 +262,6 @@ async def run(out, system):
             HybridRetriever,
             KureEmbedder,
         )
-        from finagent.slots import extract
 
         catalog = Catalog(parse_all(snap / "data/raw"))
         mcp = MCPClient()

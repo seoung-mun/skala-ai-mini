@@ -4,7 +4,8 @@ import asyncio
 from pathlib import Path
 from types import SimpleNamespace
 
-from test_graph import FakeLLM
+from legacy_rules import extract
+from test_graph import FakeLLM, route_reply
 
 from finagent.catalog import Catalog
 from finagent.graph.nodes import (
@@ -16,7 +17,6 @@ from finagent.graph.nodes import (
 )
 from finagent.parser import parse_all
 from finagent.schemas import PlanOutput
-from finagent.slots import extract
 
 CAT = Catalog(parse_all(Path(__file__).resolve().parents[1] / "data/raw"))
 
@@ -55,7 +55,8 @@ def test_calculation_followup_preserves_amount_and_intent_without_model_rewrite(
     assert result["slots"]["amount_won"] == 500000
     assert result["slots"]["term_months"] == 24
     assert result["slots"]["monthly"] is True
-    assert "세후" in result["query"]
+    assert result["slots"]["question"] == state["query"]
+    assert "rewrite" not in result["events"][0]
 
 
 def test_planner_cannot_change_deposit_to_saving_calculation():
@@ -69,6 +70,29 @@ def test_planner_cannot_change_deposit_to_saving_calculation():
     )
     kept, removed = plan_gate(plan, slots)
     assert not kept and removed
+
+
+def test_lossy_model_calculation_is_rejected_instead_of_silently_repaired():
+    import pytest
+    from test_llm_routing import RoutedLLM
+
+    from finagent.schemas import LLMOutputError
+
+    query = "그 상품에 월 50만원씩 12개월 넣으면 세후 이자가 얼마야?"
+    llm = RoutedLLM(
+        route_reply(
+            "calculate",
+            kinds=["saving"],
+            products=["우리SUPER주거래적금"],
+            term_months=12,
+            monthly=True,
+            calculation="forward",
+        )
+    )
+    with pytest.raises(LLMOutputError, match="계산 금액이 누락"):
+        asyncio.run(
+            route_node({"query": query}, SimpleNamespace(catalog=CAT, llm=llm))
+        )
 
 
 def test_spread_lookup_is_not_reused_as_calculation_rate():
@@ -101,6 +125,11 @@ def test_monthly_interest_question_does_not_change_deposit_to_saving():
     )
     calc = next(t for t in result["tasks"] if t["agent"] == "calc")
     assert calc["args"]["product_type"] == "deposit"
-    gated = asyncio.run(gate_node({"query": query, "tasks": [calc]}, deps))
+    slots = {
+        "monthly_payout": True
+    }  # 라우터 LLM이 월별 지급 이자 요청으로 해석한 결과
+    gated = asyncio.run(
+        gate_node({"query": query, "tasks": [calc], "slots": slots}, deps)
+    )
     assert not gated["tasks"]
     assert "월별 지급 이자" in gated["clarify"]
