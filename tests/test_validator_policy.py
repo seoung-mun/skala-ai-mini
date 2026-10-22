@@ -429,3 +429,113 @@ def test_after_tax_fact_checks_every_mention():
         "만기일에 계좌로 들어오는 돈을 기준으로 설명합니다. 세후 이자는 84,600원입니다."
     )
     assert not [e for e in check_requirements(inp, reply) if "세후" in e]
+
+
+# ---------------- 골든 오탐 회귀(2026-10-22 validation_log) ----------------
+def _rate(pid, bank, product, option, metric, value, unit="%"):
+    return RateRow(
+        product_id=pid,
+        bank=bank,
+        product=product,
+        option=option,
+        metric=metric,
+        value=value,
+        unit=unit,
+    )
+
+
+def _deposit_input():
+    """경남은행 The든든예금(시즌2) 12개월 공시값(골든 H2)."""
+    args = ("d", "경남은행", "The든든예금(시즌2)", "12개월 단리")
+    rows = [
+        _rate(*args, "기본금리", 2.55),
+        _rate(*args, "최고금리(우대 포함)", 4.1),
+        _rate(*args, "우대 폭(최고-기본)", 1.55, "%p"),
+    ]
+    return AnswerInput(
+        question="은행 정기예금 12개월짜리 중 최고우대금리 가장 높은 데 어디야?",
+        rows=rows,
+        documents=[
+            ProductDoc(
+                product_id="d",
+                title="경남은행 The든든예금(시즌2) (정기예금)",
+                info={"상품명": "The든든예금(시즌2)", "금융회사": "경남은행"},
+                rate_table="",
+                rates=rows,
+            )
+        ],
+    )
+
+
+def _mortgage_input():
+    """신한주택대출(아파트) 금리표와 중도상환해약금 원문(골든 N3)."""
+    args = ("m", "신한은행", "신한주택대출(아파트)")
+    rows = [
+        _rate(*args, "아파트 분할상환방식 변동금리", "최저금리", 4.29),
+        _rate(*args, "아파트 분할상환방식 고정금리", "최저금리", 4.97),
+    ]
+    return AnswerInput(
+        question="신한은행 신한주택대출(아파트) 중도상환해약금률 몇 %야?",
+        documents=[
+            ProductDoc(
+                product_id="m",
+                title="신한은행 신한주택대출(아파트) (주택담보대출)",
+                info={"상품명": "신한주택대출(아파트)", "금융회사": "신한은행"},
+                rate_table="",
+                rates=rows,
+                descriptions=[
+                    Description(
+                        section="중도상환수수료",
+                        text="-중도상환해약금:중도상환대출금*중도상환해약금률"
+                        "(고정금리0.59%, 변동금리0.59%)*(대출잔여일수/대출기간)",
+                    )
+                ],
+            )
+        ],
+    )
+
+
+@pytest.mark.parametrize(
+    "make,reply",
+    [
+        # H2·H8: '최고우대금리'는 우대 폭이 아니라 최고금리(우대 포함)다
+        (
+            _deposit_input,
+            "12개월 정기예금 중 최고우대금리가 가장 높은 곳은 경남은행 The든든예금(시즌2)로 4.1%입니다.",
+        ),
+        (_deposit_input, "경남은행 The든든예금(시즌2)의 최고 우대금리는 4.1%입니다."),
+        # N3: 원문 줄의 옵션 바로 뒤 값과 같으면 옵션 불일치가 아니다
+        (
+            _mortgage_input,
+            "신한은행 신한주택대출(아파트)의 중도상환해약금률은 고정금리와 변동금리 모두 0.59%입니다.",
+        ),
+    ],
+)
+def test_golden_false_positive_drafts_pass(make, reply):
+    assert not check_provenance(make(), reply)
+
+
+@pytest.mark.parametrize(
+    "make,reply",
+    [
+        # 기본금리를 최고우대금리로 쓰면 반려
+        (_deposit_input, "경남은행 The든든예금(시즌2)의 최고우대금리는 2.55%입니다."),
+        # '최고' 없는 우대금리는 여전히 우대 폭이다
+        (_deposit_input, "경남은행 The든든예금(시즌2)의 우대금리는 4.1%입니다."),
+        # 변동금리 값을 고정금리로 쓰면 금리표 기준으로 반려
+        (_mortgage_input, "신한은행 신한주택대출(아파트)의 고정금리는 4.29%입니다."),
+        # 원문에 없는 해약금률
+        (
+            _mortgage_input,
+            "신한은행 신한주택대출(아파트)의 중도상환해약금률은 고정금리 0.7%입니다.",
+        ),
+    ],
+)
+def test_wrong_option_or_metric_is_still_caught(make, reply):
+    assert check_provenance(make(), reply)
+
+
+def test_bare_spread_label_still_means_spread():
+    """'우대금리 1.55%p'는 우대 폭으로 검증된다."""
+    reply = "경남은행 The든든예금(시즌2)의 12개월 우대금리는 1.55%p입니다."
+    assert not check_provenance(_deposit_input(), reply)

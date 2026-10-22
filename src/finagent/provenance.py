@@ -16,6 +16,7 @@ from .validate import (
 )
 
 _RATE_LABELS = {
+    "최고우대금리": "max",  # '우대금리'(spread)보다 먼저 맞춰야 최고금리로 읽는다
     "기본금리": "base",
     "기본": "base",
     "최고금리": "max",
@@ -41,6 +42,18 @@ _OPTION_RE = re.compile(
 def _rate_metric(label: str) -> str | None:
     match = _RATE_LABEL_RE.search(squash(label))
     return _RATE_LABELS[match[0]] if match else None
+
+
+def _option_value_in_line(line: str, words: set[str], value: float) -> bool:
+    """원문 한 줄에서 모든 옵션 단어 바로 뒤에 같은 값이 있는지(예: '고정금리0.59%, 변동금리0.59%')."""
+    quoted = squash(line)
+    return bool(words) and all(
+        any(
+            value in values_of(quoted[m.end() : m.end() + 12], "pct")
+            for m in re.finditer(re.escape(word), quoted)
+        )
+        for word in words
+    )
 
 
 def _show(value: float, unit: str) -> str:
@@ -129,7 +142,9 @@ def check_provenance(inp, reply: str, notes: list | None = None) -> list[str]:
             unit == "%p"
             and "우대" in clause
             and all(
-                m[0] == "최고" or _RATE_LABELS[m[0]] == "spread" for m in labels
+                m[0] in ("최고", "최고우대금리")
+                or _RATE_LABELS[m[0]] == "spread"
+                for m in labels
             )
         ):
             metric = "spread"
@@ -156,6 +171,15 @@ def check_provenance(inp, reply: str, notes: list | None = None) -> list[str]:
                     for occurrence in re.finditer(re.escape(quoted), text):
                         if occurrence.start() <= pos < occurrence.end():
                             return True
+                    # 금리 종류 없이 옵션으로 말한 수치는 원문 줄의 같은 옵션 값이면 근거다
+                    if (
+                        metric is None
+                        and kind == "pct"
+                        and _option_value_in_line(
+                            line, option_words - set(terms), value
+                        )
+                    ):
+                        return True
             if not (
                 kind == "pct" and unit == "%p" and metric in (None, "spread")
             ):
