@@ -1,6 +1,6 @@
 # API 계약 (백엔드 ↔ 프론트)
 
-- 버전: **0.10.0** (2026-10-21)
+- 버전: **0.11.0** (2026-10-22)
 - 백엔드 `127.0.0.1:8100`, 프론트는 8600에서 같은 경로로 프록시한다.
 - 예시 스트림: `doc/contract/stream_easy.sse`, `stream_hard.sse`, `stream_error.sse`, `stream_v1.sse`
 
@@ -8,6 +8,7 @@
 
 | 버전 | 날짜 | 변경 |
 |---|---|---|
+| 0.11.0 | 2026-10-22 | LLM 라우팅 전환(하위 호환 필드 추가). `RouteDecided`에 `operation`, `comparison_scope`, `rank`, `conditions`, `validation_attempts` 추가, `intent`에 거절 사유 `future_rate` \| `unsupported` 추가, 라우터가 조건을 되물으면 `RouteDecided` 다음 바로 `FinalAnswer`. 답변 상품 id를 다음 턴 조건으로 저장 |
 | 0.10.0 | 2026-10-21 | 검증 기준 정리: 대상·조건·항목·수치·단위가 틀리면 반려, 표·순서·의역은 허용. 근거와 연결하지 못한 수치·설명은 반려하지 않고 `Validation.unverified`(선택, 문자열 배열)로 알리며 답 끝에 확인 안내를 붙임. 답에 쓴 계산식이 틀리면 반려. 미래 금리 확정 질문은 거절 응답. 이자 계산 Decimal 절사(원 미만 버림). 추가 필드만 있어 기존 클라이언트 호환 |
 | 0.9.0 | 2026-10-21 | 사용자 조회 조건을 자동 완화하지 않음. 계산용 연이율과 우대 폭 분리, 상품 이자·상환 방식 보존, 후속 계산 조건 유지, 상품·기간·금리 종류별 근거 검증. 실패한 모델 응답 사용량도 합산. 외부 응답 필드 유지; 내부 MCP 조회 행에 `interest_type`, `repayment`, `rpay_type_nm` 선택 필드 추가 |
 | 0.8.0 | 2026-10-21 | `POST /sessions/reset`로 해당 대화의 서버 이력·슬롯 초기화. 같은 대화 요청과 초기화는 직렬 처리. 화면은 성공 후 새 ID로 전환하고 실패 시 기존 대화를 보존. 가입정보의 근거 없는 추가 주장·원문 부정 반려 및 비교 대상 밖 검색 후보 제외 |
@@ -63,7 +64,8 @@
 `route` 의미: `chat` 인사·잡담(검색 없음), `out_of_scope` 금융상품 범위 밖(정중히 거절),
 `easy` 단일 상품 사실 조회(즉답 경로), `hard` 비교·집계·계산(계획·도구·검증 경로).
 
-`RouteDecided.intent`는 선택 필드이며 대화 회상(`recall`)도 `route=chat`이다.
+`RouteDecided.intent`는 선택 필드이며 대화 회상(`recall`)도 `route=chat`이다. `route=out_of_scope`이면 `intent`는 거절 사유(`future_rate` \| `unsupported`)다.
+`RouteDecided`의 `operation`·`comparison_scope`·`rank`·`conditions`는 LLM 라우터 해석 결과(선택 필드)이며 화면은 표시하지 않아도 된다.
 `Validation=pass`는 구현된 수치·근거 및 요청 항목 검사 통과를 뜻하며, 모든 자연어 의미의 정확성을 보장하지 않는다.
 현재 완료 조건은 명시적 여러 상품 비교의 상품별 금리, 가입대상·가입방법·가입제한,
 요청한 세전·세후 이자와 부족한 조회 개수의 명시를 검사한다. 가입 정보는 공시 원문 일치 기준이다.
